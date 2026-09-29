@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -31,8 +32,18 @@ var (
 // Executor 只执行工具调用、不发送消息（spec §14.4 的 Executor 模式），适合把工具执行部署在
 // 发送消息的进程之外。用 Client.Executor 构造。
 type Executor struct {
-	c     *Client
-	tools []Tool
+	c      *Client
+	tools  []Tool
+	onFork func(ctx context.Context, f ForkInfo) error
+}
+
+// OnFork 设置接入 fork 出的会话时的回调（spec §8.4）：Attach 在处理任何工具调用之前调用 fn，
+// 传入 fork 点的 executor_state_ref，由调用方恢复执行环境（例如 git checkout <sha>）。
+// fn 返回错误时 Attach 返回该错误，不执行任何调用。每次 Attach 都会调用（包括重新接入进行中的 fork 会话，
+// 此时可以根据 ForkInfo.Session 判断是否需要恢复）。返回 x 本身，便于链式调用。
+func (x *Executor) OnFork(fn func(ctx context.Context, f ForkInfo) error) *Executor {
+	x.onFork = fn
+	return x
 }
 
 // Executor 返回执行 tools 的 Executor。同一 Client 的所有执行器使用同一个 executor_id。
@@ -59,6 +70,15 @@ func (x *Executor) Attach(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
+	if s.ForkedFrom != nil && x.onFork != nil {
+		info, err := forkInfoOf(ctx, x.c, s)
+		if err != nil {
+			return err
+		}
+		if err := x.onFork(ctx, info); err != nil {
+			return fmt.Errorf("maat: on fork: %w", err)
+		}
+	}
 	if err := ex.backfill(ctx, sessionID); err != nil {
 		return err
 	}
@@ -69,6 +89,27 @@ func (x *Executor) Attach(ctx context.Context, sessionID string) error {
 		ex.handle(raw.Event)
 	}
 	return ctx.Err()
+}
+
+// forkInfoOf 读取 fork 出的会话的第一条事件 session.forked，取出 executor_state_ref。
+func forkInfoOf(ctx context.Context, x *Client, s *Session) (ForkInfo, error) {
+	info := ForkInfo{Session: s, From: *s.ForkedFrom}
+	err := x.call(ctx, true, func(ctx context.Context) error {
+		r, err := x.events.ListSessionEvents(ctx, connect.NewRequest(&maatv1.ListSessionEventsRequest{
+			SessionId: s.ID, Types: []string{"session.forked"}, Page: &maatv1.PageRequest{PageSize: 1},
+		}))
+		if err != nil {
+			return err
+		}
+		if evts := r.Msg.GetEvents(); len(evts) > 0 {
+			info.ExecutorStateRef = evts[0].GetSessionForked().GetExecutorStateRef()
+		}
+		return nil
+	})
+	if err != nil {
+		return ForkInfo{}, err
+	}
+	return info, nil
 }
 
 // executor 执行一次订阅中收到的工具调用：认领 → 执行（并发受限）→ 按 lease/3 续约 → 回传。

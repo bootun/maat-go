@@ -16,7 +16,7 @@ GO ?= go
 # 后端仓库（闭源）的本地检出，只用于同步 proto 与运行集成测试。
 MAAT_DIR ?= ../maat
 # SDK 用到的公开 API proto（maat.v1 的子集）。新功能需要其他文件时加在这里，然后 make sync-proto gen。
-PROTO_FILES := common meta tool session event
+PROTO_FILES := common meta tool session event blob
 
 .PHONY: tools
 tools: ## 安装固定版本的工具到 ./bin

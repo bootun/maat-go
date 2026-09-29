@@ -232,12 +232,19 @@ func SetExecutorStateRef(ctx context.Context, ref string) error {
 	if !ok {
 		return ErrNotInTool
 	}
-	if len(ref) > maxExecutorStateRefBytes {
-		return fmt.Errorf("maat: executor state ref exceeds %d bytes", maxExecutorStateRefBytes)
+	if err := checkExecutorStateRef(ref); err != nil {
+		return err
 	}
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.stateRef = ref
+	return nil
+}
+
+func checkExecutorStateRef(ref string) error {
+	if len(ref) > maxExecutorStateRefBytes {
+		return fmt.Errorf("maat: executor state ref exceeds %d bytes", maxExecutorStateRefBytes)
+	}
 	return nil
 }
 

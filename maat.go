@@ -39,12 +39,14 @@ import (
 )
 
 // Version 是 SDK 的版本，写在 User-Agent 中。
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // Client 是 maat 平台的客户端，可以并发使用。
 type Client struct {
 	// Sessions 管理会话。
 	Sessions *Sessions
+	// Checkpoints 列出与标注 checkpoint（spec §8）。
+	Checkpoints *Checkpoints
 
 	cfg config
 	// err 是配置错误；非空时每次调用都返回它。
@@ -53,6 +55,7 @@ type Client struct {
 	sessions maatv1connect.SessionServiceClient
 	events   maatv1connect.EventServiceClient
 	tools    maatv1connect.ToolServiceClient
+	blobs    maatv1connect.BlobServiceClient
 	// executorID 标识本 Client 的工具执行器（exe_ 前缀），用于认领与回传。
 	executorID string
 }
@@ -72,6 +75,7 @@ func NewClient(opts ...Option) *Client {
 	}
 	c := &Client{cfg: cfg, executorID: "exe_" + rand.Text()}
 	c.Sessions = &Sessions{c: c}
+	c.Checkpoints = &Checkpoints{c: c}
 	base, err := normalizeBaseURL(cfg.baseURL)
 	if err == nil && cfg.apiKey == "" {
 		err = ErrNoAPIKey
@@ -82,6 +86,7 @@ func NewClient(opts ...Option) *Client {
 	c.sessions = maatv1connect.NewSessionServiceClient(cfg.httpClient, base, ic)
 	c.events = maatv1connect.NewEventServiceClient(cfg.httpClient, base, ic)
 	c.tools = maatv1connect.NewToolServiceClient(cfg.httpClient, base, ic)
+	c.blobs = maatv1connect.NewBlobServiceClient(cfg.httpClient, base, ic)
 	return c
 }
 

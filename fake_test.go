@@ -22,6 +22,7 @@ type fakeBackend struct {
 	maatv1connect.UnimplementedSessionServiceHandler
 	maatv1connect.UnimplementedEventServiceHandler
 	maatv1connect.UnimplementedToolServiceHandler
+	maatv1connect.UnimplementedBlobServiceHandler
 
 	whoAmI     func(ctx context.Context, req *connect.Request[maatv1.WhoAmIRequest]) (*connect.Response[maatv1.WhoAmIResponse], error)
 	create     func(req *maatv1.CreateSessionRequest) (*maatv1.CreateSessionResponse, error)
@@ -34,6 +35,10 @@ type fakeBackend struct {
 	renew      func(req *maatv1.RenewToolCallLeaseRequest) (*maatv1.RenewToolCallLeaseResponse, error)
 	submit     func(req *maatv1.SubmitToolResultRequest) (*maatv1.SubmitToolResultResponse, error)
 	pending    func(req *maatv1.ListPendingToolCallsRequest) (*maatv1.ListPendingToolCallsResponse, error)
+	fork       func(req *maatv1.ForkSessionRequest) (*maatv1.ForkSessionResponse, error)
+	ckpts      func(req *maatv1.ListCheckpointsRequest) (*maatv1.ListCheckpointsResponse, error)
+	annotate   func(req *maatv1.AnnotateCheckpointRequest) (*maatv1.AnnotateCheckpointResponse, error)
+	getBlob    func(req *maatv1.GetBlobRequest) (*maatv1.GetBlobResponse, error)
 	// conns[i] 是第 i 个事件流连接的行为；超出时连接一直保持到客户端断开。
 	conns []func(ctx context.Context, st *connect.ServerStream[maatv1.StreamSessionEventsResponse]) error
 
@@ -86,6 +91,22 @@ func (f *fakeBackend) ListPendingToolCalls(_ context.Context, req *connect.Reque
 	return respond(f.pending(req.Msg))
 }
 
+func (f *fakeBackend) ForkSession(_ context.Context, req *connect.Request[maatv1.ForkSessionRequest]) (*connect.Response[maatv1.ForkSessionResponse], error) {
+	return respond(f.fork(req.Msg))
+}
+
+func (f *fakeBackend) ListCheckpoints(_ context.Context, req *connect.Request[maatv1.ListCheckpointsRequest]) (*connect.Response[maatv1.ListCheckpointsResponse], error) {
+	return respond(f.ckpts(req.Msg))
+}
+
+func (f *fakeBackend) AnnotateCheckpoint(_ context.Context, req *connect.Request[maatv1.AnnotateCheckpointRequest]) (*connect.Response[maatv1.AnnotateCheckpointResponse], error) {
+	return respond(f.annotate(req.Msg))
+}
+
+func (f *fakeBackend) GetBlob(_ context.Context, req *connect.Request[maatv1.GetBlobRequest]) (*connect.Response[maatv1.GetBlobResponse], error) {
+	return respond(f.getBlob(req.Msg))
+}
+
 func (f *fakeBackend) StreamSessionEvents(ctx context.Context, req *connect.Request[maatv1.StreamSessionEventsRequest],
 	st *connect.ServerStream[maatv1.StreamSessionEventsResponse]) error {
 	f.mu.Lock()
@@ -127,6 +148,7 @@ func newTestClient(t *testing.T, f *fakeBackend) *Client {
 	mux.Handle(maatv1connect.NewSessionServiceHandler(f))
 	mux.Handle(maatv1connect.NewEventServiceHandler(f))
 	mux.Handle(maatv1connect.NewToolServiceHandler(f))
+	mux.Handle(maatv1connect.NewBlobServiceHandler(f))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	c := NewClient(WithBaseURL(srv.URL), WithAPIKey("test-key"), WithHTTPClient(srv.Client()),

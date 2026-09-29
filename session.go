@@ -2,6 +2,7 @@ package maat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"time"
@@ -153,8 +154,10 @@ type Session struct {
 	PendingToolCalls uint32
 	Usage            Usage
 	Archived         bool
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// ForkedFrom 是 fork 的来源；不是 fork 出的会话时为 nil（spec §8.3）。
+	ForkedFrom *ForkOrigin
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 	// Tools 是本进程为该会话执行的工具实现：Send 返回的 Run 在 Stream / Wait 时自动执行其中的工具调用。
 	// Sessions.Create 时设为 CreateSessionParams.Tools；通过 Sessions.Get、List 取得的会话需要自行设置
 	// （声明已在创建会话时提交给平台）。
@@ -163,14 +166,25 @@ type Session struct {
 	c *Client
 }
 
+// ForkOrigin 是 fork 出的会话的来源：源会话、checkpoint 与 fork 点的 seq。
+type ForkOrigin struct {
+	SessionID    string
+	CheckpointID string
+	Seq          uint64
+}
+
 func (c *Client) sessionOf(p *maatv1.Session) *Session {
-	return &Session{
+	s := &Session{
 		ID: p.GetId(), AgentID: p.GetAgentId(), AgentVersion: p.GetAgentVersion(), Model: p.GetModel(),
 		Status: enumOf[SessionStatus](p.GetStatus(), "SESSION_STATUS_"), Title: p.GetTitle(), Metadata: p.GetMetadata(),
 		PrimaryThreadID: p.GetPrimaryThreadId(), LastSeq: p.GetLastSeq(), PendingToolCalls: p.GetPendingToolCalls(),
 		Usage: usageOf(p.GetUsage()), Archived: p.GetLifecycle() == maatv1.Lifecycle_LIFECYCLE_ARCHIVED,
 		CreatedAt: p.GetCreatedAt().AsTime(), UpdatedAt: p.GetUpdatedAt().AsTime(), c: c,
 	}
+	if f := p.GetForkedFrom(); f != nil {
+		s.ForkedFrom = &ForkOrigin{SessionID: f.GetSessionId(), CheckpointID: f.GetCheckpointId(), Seq: f.GetSeq()}
+	}
+	return s
 }
 
 // MessageInput 是发送给 Agent 的消息。Phase 1 只支持文本与 JSON。
@@ -318,16 +332,54 @@ func (s *Session) Interrupt(ctx context.Context, opts ...InterruptOption) error 
 // historyPageSize 是 History 每次请求的条数（平台上限 500）。
 const historyPageSize = 200
 
+// HistoryOption 配置 History。
+type HistoryOption func(*historyOptions)
+
+type historyOptions struct {
+	expandRefs, ancestors bool
+	types, threadIDs      []string
+}
+
+// ExpandRefs 让平台把只给了预览（或只给了 ref）的内容换成完整内容：user.message 与 agent.message 的正文、
+// agent.tool_call 的参数、tool_call.completed 的结果。每条上限 256KB，超出时保持原样（可用 Session.GetBlob 读取）。
+func ExpandRefs() HistoryOption { return func(o *historyOptions) { o.expandRefs = true } }
+
+// IncludeAncestors 对 fork 出的会话先返回祖先会话在 fork 点之前的事件（最多 16 层，按"最远的祖先 → 当前会话"
+// 的顺序），每条事件的 SessionId 标明来源（spec §8.3）。不能与 afterSeq > 0 同时使用。
+func IncludeAncestors() HistoryOption { return func(o *historyOptions) { o.ancestors = true } }
+
+// HistoryTypes 只返回这些类型的事件，例如 "agent.message"。
+func HistoryTypes(types ...string) HistoryOption {
+	return func(o *historyOptions) { o.types = append(o.types, types...) }
+}
+
+// HistoryThreads 只返回这些线程的事件。
+func HistoryThreads(threadIDs ...string) HistoryOption {
+	return func(o *historyOptions) { o.threadIDs = append(o.threadIDs, threadIDs...) }
+}
+
+// ErrAncestorsWithAfterSeq 表示 IncludeAncestors 与 afterSeq > 0 同时使用：谱系链中的位置只能由分页表示。
+var ErrAncestorsWithAfterSeq = errors.New("maat: IncludeAncestors cannot be combined with afterSeq > 0")
+
 // History 按 seq 顺序读取 seq > afterSeq 的已提交事件，自动翻页（spec §11.6）。
-// 历史中每个 step 只有成功那次 attempt 的内容，不需要对账。
-func (s *Session) History(ctx context.Context, afterSeq uint64) iter.Seq2[RawEvent, error] {
+// 历史中每个 step 只有成功那次 attempt 的内容，不需要对账。已归档的历史由平台透明地从对象存储读取。
+func (s *Session) History(ctx context.Context, afterSeq uint64, opts ...HistoryOption) iter.Seq2[RawEvent, error] {
+	var o historyOptions
+	for _, f := range opts {
+		f(&o)
+	}
 	return func(yield func(RawEvent, error) bool) {
+		if o.ancestors && afterSeq > 0 {
+			yield(RawEvent{}, ErrAncestorsWithAfterSeq)
+			return
+		}
 		token := ""
 		for {
 			var res *maatv1.ListSessionEventsResponse
 			err := s.c.call(ctx, true, func(ctx context.Context) error {
 				r, err := s.c.events.ListSessionEvents(ctx, connect.NewRequest(&maatv1.ListSessionEventsRequest{
 					SessionId: s.ID, AfterSeq: afterSeq, Page: &maatv1.PageRequest{PageSize: historyPageSize, PageToken: token},
+					ThreadIds: o.threadIDs, Types: o.types, IncludeAncestors: o.ancestors, ExpandRefs: o.expandRefs,
 				}))
 				if err != nil {
 					return err

@@ -339,8 +339,9 @@ message ForkSessionRequest {
   string client_message_id = 4;
   // 可选：覆盖模型别名。
   string model = 5;
-  // 可选：覆盖工具集（默认继承源会话）。
+  // 可选：覆盖工具集；为空时继承源会话。
   repeated ToolDefinition tools = 6;
+  // metadata 与 title 不从源会话继承。
   map<string, string> metadata = 7;
   string title = 8;
   string idempotency_key = 9;

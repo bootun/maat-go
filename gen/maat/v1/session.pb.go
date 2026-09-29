@@ -2176,8 +2176,9 @@ type ForkSessionRequest struct {
 	ClientMessageId string        `protobuf:"bytes,4,opt,name=client_message_id,json=clientMessageId,proto3" json:"client_message_id,omitempty"`
 	// 可选：覆盖模型别名。
 	Model string `protobuf:"bytes,5,opt,name=model,proto3" json:"model,omitempty"`
-	// 可选：覆盖工具集（默认继承源会话）。
-	Tools          []*ToolDefinition `protobuf:"bytes,6,rep,name=tools,proto3" json:"tools,omitempty"`
+	// 可选：覆盖工具集；为空时继承源会话。
+	Tools []*ToolDefinition `protobuf:"bytes,6,rep,name=tools,proto3" json:"tools,omitempty"`
+	// metadata 与 title 不从源会话继承。
 	Metadata       map[string]string `protobuf:"bytes,7,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Title          string            `protobuf:"bytes,8,opt,name=title,proto3" json:"title,omitempty"`
 	IdempotencyKey string            `protobuf:"bytes,9,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`

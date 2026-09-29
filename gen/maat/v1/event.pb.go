@@ -2647,7 +2647,8 @@ type ListSessionEventsRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	ProjectId string                 `protobuf:"bytes,1,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	SessionId string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	// 返回 seq > after_seq 的事件。
+	// 返回 seq > after_seq 的事件；给了 page_token 时以 token 为准。
+	// 不能与 include_ancestors 同时使用（after_seq_with_ancestors），祖先链中的位置只能由 page_token 表示。
 	AfterSeq uint64 `protobuf:"varint,3,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
 	// page_size ≤ 500；include_ancestors 时 page_token 编码祖先链位置。
 	Page      *PageRequest `protobuf:"bytes,4,opt,name=page,proto3" json:"page,omitempty"`

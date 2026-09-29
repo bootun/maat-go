@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package maat.v1;
+
+import "google/protobuf/timestamp.proto";
+import "maat/v1/common.proto";
+
+// BlobService 读取会话引用的 Blob（spec §13.2）：小对象直接返回，大对象返回预签名 URL。
+service BlobService {
+  rpc GetBlob(GetBlobRequest) returns (GetBlobResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message GetBlobRequest {
+  string project_id = 1;
+  // ref 必须被该会话的事件、工具调用或 checkpoint 引用（防止跨会话枚举）。
+  string session_id = 2;
+  // sha256:<hex>
+  string ref = 3;
+}
+
+message GetBlobResponse {
+  string ref = 1;
+  // Blob 种类："message"、"tool_args"、"tool_result"、"summary"。
+  string kind = 2;
+  // 内容（公开格式，见 content_type）的字节数。
+  uint64 size = 3;
+  oneof body {
+    // ≤ 1MB 时直接返回内容。
+    bytes content = 4;
+    // 更大时返回 15 分钟有效的预签名 URL（响应可能带 Content-Encoding: zstd）。
+    string download_url = 5;
+  }
+  google.protobuf.Timestamp download_url_expires_at = 6;
+  // 内容的公开格式，与存储格式无关：
+  //   message      application/json（BlobMessage 的 JSON）
+  //   tool_args    application/json（模型给出的参数原文）
+  //   tool_result  application/json（ToolResult 的 JSON）
+  //   summary      text/markdown; charset=utf-8
+  string content_type = 7;
+}
+
+// BlobMessage 是 kind=message 的 Blob 的公开格式（user.message 与 agent.message 的完整内容）。
+message BlobMessage {
+  // "user" | "assistant"
+  string role = 1;
+  repeated ContentPart parts = 2;
+  // assistant 的推理内容（模型支持时）。
+  string reasoning = 3;
+  // 中断时的部分输出。
+  bool partial = 4;
+}

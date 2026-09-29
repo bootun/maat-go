@@ -317,7 +317,8 @@ message StreamSessionEventsResponse {
 message ListSessionEventsRequest {
   string project_id = 1;
   string session_id = 2;
-  // 返回 seq > after_seq 的事件。
+  // 返回 seq > after_seq 的事件；给了 page_token 时以 token 为准。
+  // 不能与 include_ancestors 同时使用（after_seq_with_ancestors），祖先链中的位置只能由 page_token 表示。
   uint64 after_seq = 3;
   // page_size ≤ 500；include_ancestors 时 page_token 编码祖先链位置。
   PageRequest page = 4;

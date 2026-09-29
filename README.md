@@ -105,6 +105,37 @@ go run ./examples/tools -root . "README 里写了什么？"   # 发送消息并�
 go run ./examples/tools -root . -attach ses_...        # Executor 模式
 ```
 
+## 历史、Checkpoint 与 Fork
+
+```go
+// 分页读取历史：ExpandRefs 内联完整内容（每条 ≤ 256KB），IncludeAncestors 先返回 fork 祖先在 fork 点之前的事件。
+for ev, err := range s.History(ctx, 0, maat.IncludeAncestors(), maat.ExpandRefs()) { ... }
+
+// 列出可以 fork 的 checkpoint，事后标注 executor_state_ref。
+for cp, err := range c.Checkpoints.List(ctx, s.ID, maat.ListCheckpointsParams{StableOnly: true}) { ... }
+cp, err := c.Checkpoints.Annotate(ctx, "ckp_...", "git:abc123")
+
+// 从稳定的 checkpoint fork 并附带消息；先按 ExecutorStateRef 恢复环境，再等待新 Run。
+forked, err := c.Sessions.Fork(ctx, maat.ForkSessionParams{
+    CheckpointID: "ckp_...", Message: maat.TextMessage("换个思路"), Tools: []maat.Tool{readFile},
+})
+restore(forked.ExecutorStateRef) // 例如 git checkout
+res, err := forked.Run.Wait(ctx)
+
+// 在其他进程执行工具：Executor 接入 fork 出的会话时先回调 OnFork。
+err = c.Executor(readFile).OnFork(func(ctx context.Context, f maat.ForkInfo) error {
+    return restore(f.ExecutorStateRef)
+}).Attach(ctx, forked.Session.ID)
+
+// 读取事件中 content_ref / args_ref / result_ref 指向的完整内容（≤ 1MB 直接返回，更大时是预签名 URL）。
+blob, err := s.GetBlob(ctx, ref)
+```
+
+- 只有稳定的 checkpoint（没有未完成的工具调用）可以 fork；fork 的会话继承 Agent 版本、模型别名与工具集
+  （`Model`、`Tools` 可以覆盖），不继承 `Title` 与 `Metadata`。
+- `IncludeAncestors` 不能与 `afterSeq > 0` 同时使用（`ErrAncestorsWithAfterSeq`）。
+- 空闲的会话会被平台归档到对象存储，`History` 与 `Stream` 的结果不受影响。
+
 ## 概念
 
 | API | 说明 |
@@ -114,12 +145,15 @@ go run ./examples/tools -root . -attach ses_...        # Executor 模式
 | `Sessions.Create / Get / List` | 创建、读取、列出会话（`List` 自动翻页） |
 | `Session.Send / SendInput` | 发送消息，返回处理它的 `Run`。线程运行中调用即为**插入消息**，返回正在运行的 Run（`Delivery == DeliveryInserted`） |
 | `Session.Interrupt(ctx, opts...)` | 中断线程当前的 Run（`InterruptThread` 指定线程）；中断后立即发新消息用 `Send(..., WithInterrupt())` |
-| `Session.History(ctx, afterSeq)` | 按 seq 读取已提交事件 |
+| `Session.History(ctx, afterSeq, opts...)` | 按 seq 读取已提交事件（`ExpandRefs`、`IncludeAncestors`、`HistoryTypes`、`HistoryThreads`） |
+| `Sessions.Fork(ctx, params)` | 从稳定的 checkpoint 创建新会话，返回新会话、带消息时的 Run 与 `ExecutorStateRef` |
+| `Checkpoints.List / Annotate` | 列出 checkpoint（自动翻页）；事后设置 executor_state_ref |
+| `Session.GetBlob(ctx, ref)` | 读取会话（或它的 fork 祖先）引用的大内容 |
 | `Session.Stream(ctx, opts...)` | 先补齐历史（`AfterSeq`，默认 0），再接实时流 |
 | `Run.Stream(ctx, opts...)` | 只产出该 Run 的事件，直到 `RunCompletedEvent` / `RunFailedEvent`；默认自动执行工具 |
 | `Run.Wait(ctx, opts...)` | 等待 Run 结束。Run 失败不算调用错误：`err == nil`，`Result.Error` 有值 |
 | `NewTool`、`SchemaFor` | 声明由本进程执行的工具（见[工具](#工具)） |
-| `Client.Executor(tools...).Attach(ctx, sessionID)` | Executor 模式：只执行工具调用 |
+| `Client.Executor(tools...).Attach(ctx, sessionID)` | Executor 模式：只执行工具调用；`OnFork` 在接入 fork 出的会话时先回调 |
 
 ### 事件
 
@@ -174,7 +208,7 @@ make test-integration   # 集成测试：先在后端仓库执行 make up
 ```
 
 集成测试（`//go:build integration`）针对后端的 docker compose 环境运行，覆盖创建、发送、流式、插入、断线续传、
-工具往返、Executor 模式与中断。
+工具往返、Executor 模式、中断，以及 fork 与 executor_state_ref 往返。
 连接信息默认取 `$(MAAT_DIR)/deploy/.env.e2e`，也可以用环境变量 `MAAT_E2E_BASE_URL`、
 `MAAT_E2E_ADMIN_API_KEY`、`MAAT_E2E_SDK_API_KEY` 指定；未配置时跳过。
 
