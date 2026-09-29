@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package maat.v1;
+
+import "google/protobuf/struct.proto";
+
+// ContentPart 是消息或工具结果中的一段内容。Phase 1 只支持文本与 JSON，不支持图片。
+message ContentPart {
+  oneof part {
+    // 纯文本。
+    string text = 1;
+    // 结构化 JSON。
+    google.protobuf.Struct json = 2;
+  }
+}
+
+// MessageInput 是调用方发送给 Agent 的一条消息。
+message MessageInput {
+  repeated ContentPart parts = 1;
+}
+
+// ErrorInfo 作为 Connect 错误的 detail 返回，携带稳定的机器可读原因。
+message ErrorInfo {
+  // 稳定的原因，例如 "tool_call_not_pending"、"session_archived"。
+  string reason = 1;
+  // 与原因相关的附加信息。
+  map<string, string> metadata = 2;
+}
+
+// PageRequest 是列表类请求的分页参数（spec §13.1）。
+message PageRequest {
+  // 每页条数；0 表示使用服务端默认值，超过上限时按上限处理。
+  uint32 page_size = 1;
+  // 上一页响应中的 next_page_token；为空表示第一页。不透明，调用方不得解析。
+  string page_token = 2;
+}
+
+// PageResponse 是列表类响应的分页信息（spec §13.1）。
+message PageResponse {
+  // 下一页的 token；没有下一页时为空。
+  string next_page_token = 1;
+}
+
+// Usage 是模型调用的 token 用量。
+message Usage {
+  uint64 input_tokens = 1;
+  uint64 output_tokens = 2;
+  uint64 cached_input_tokens = 3;
+  uint64 reasoning_tokens = 4;
+}

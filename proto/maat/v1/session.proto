@@ -1,0 +1,439 @@
+syntax = "proto3";
+
+package maat.v1;
+
+import "google/protobuf/timestamp.proto";
+import "maat/v1/common.proto";
+import "maat/v1/meta.proto";
+import "maat/v1/tool.proto";
+
+// SessionService 是会话的公开 API（spec §13.2）。
+// 所有请求中的 project_id 为空时取 API Key 绑定的项目；控制台用户调用时必填。
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // SendMessage 发送消息；线程运行中调用即为插入消息（spec §5.3）。
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc InterruptSession(InterruptSessionRequest) returns (InterruptSessionResponse);
+  // ForkSession 从稳定的 checkpoint 派生新会话（spec §8.3）。
+  rpc ForkSession(ForkSessionRequest) returns (ForkSessionResponse);
+  rpc ArchiveSession(ArchiveSessionRequest) returns (ArchiveSessionResponse);
+  rpc UnarchiveSession(UnarchiveSessionRequest) returns (UnarchiveSessionResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GetRun(GetRunRequest) returns (GetRunResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // AnnotateCheckpoint 事后为 checkpoint 标注 executor_state_ref（spec §8.4）。
+  rpc AnnotateCheckpoint(AnnotateCheckpointRequest) returns (AnnotateCheckpointResponse);
+}
+
+// SessionStatus 是全部线程状态的聚合（spec §4.3）。
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  SESSION_STATUS_IDLE = 1;
+  SESSION_STATUS_RUNNING = 2;
+  SESSION_STATUS_REQUIRES_ACTION = 3;
+}
+
+// ThreadStatus 是线程状态（spec §4.3）。
+enum ThreadStatus {
+  THREAD_STATUS_UNSPECIFIED = 0;
+  THREAD_STATUS_IDLE = 1;
+  THREAD_STATUS_RUNNING = 2;
+  THREAD_STATUS_REQUIRES_ACTION = 3;
+  THREAD_STATUS_WAITING = 4;
+}
+
+// RunStatus 是 Run 状态。
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_RUNNING = 1;
+  RUN_STATUS_REQUIRES_ACTION = 2;
+  RUN_STATUS_WAITING = 3;
+  RUN_STATUS_FINISHED = 4;
+}
+
+// StopReason 是 Run 结束 / 线程空闲的原因。
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;
+  STOP_REASON_END_TURN = 1;
+  STOP_REASON_INTERRUPTED = 2;
+  STOP_REASON_MAX_STEPS = 3;
+  STOP_REASON_ERROR = 4;
+  // 会话被归档或删除。
+  STOP_REASON_CANCELLED = 5;
+}
+
+// Lifecycle 是会话的生命周期。
+enum Lifecycle {
+  LIFECYCLE_UNSPECIFIED = 0;
+  LIFECYCLE_ACTIVE = 1;
+  LIFECYCLE_ARCHIVED = 2;
+  LIFECYCLE_DELETED = 3;
+}
+
+// Delivery 是消息被接收时的投递方式（spec §5.3）。
+enum Delivery {
+  DELIVERY_UNSPECIFIED = 0;
+  // 线程空闲，开启了新 Run。
+  DELIVERY_NEW_RUN = 1;
+  // 并入当前 Run，下一个 step 开始前投递。
+  DELIVERY_INSERTED = 2;
+  // 当前 Run 在等待工具结果，消息在全部 tool 消息之后投递。
+  DELIVERY_QUEUED_AFTER_TOOL_RESULTS = 3;
+}
+
+// ThreadMode 是子线程的运行模式（spec §7）。
+enum ThreadMode {
+  THREAD_MODE_UNSPECIFIED = 0;
+  THREAD_MODE_FOREGROUND = 1;
+  THREAD_MODE_BACKGROUND = 2;
+}
+
+// CheckpointKind 是 checkpoint 的粒度（spec §8.1）。
+enum CheckpointKind {
+  CHECKPOINT_KIND_UNSPECIFIED = 0;
+  CHECKPOINT_KIND_STEP = 1;
+  CHECKPOINT_KIND_TURN = 2;
+}
+
+// InboxKind 是线程 inbox 条目的类型。
+enum InboxKind {
+  INBOX_KIND_UNSPECIFIED = 0;
+  INBOX_KIND_USER_MESSAGE = 1;
+  INBOX_KIND_SUBAGENT_RESULT = 2;
+}
+
+// RunTrigger 是开启 Run 的原因。
+enum RunTrigger {
+  RUN_TRIGGER_UNSPECIFIED = 0;
+  RUN_TRIGGER_USER_MESSAGE = 1;
+  RUN_TRIGGER_TOOL_RESULTS = 2;
+  RUN_TRIGGER_SUBAGENT_RESULT = 3;
+  RUN_TRIGGER_FORK = 4;
+  // 由 spawn_agent 创建的子线程的第一个 Run（plan S17）。
+  RUN_TRIGGER_SPAWN = 5;
+}
+
+// Actor 是操作者（API Key 或控制台用户）。
+message Actor {
+  PrincipalKind kind = 1;
+  string id = 2;
+}
+
+// ForkOrigin 记录会话从哪里 fork 而来。
+message ForkOrigin {
+  string session_id = 1;
+  string checkpoint_id = 2;
+  uint64 seq = 3;
+}
+
+// Session 是会话。
+message Session {
+  string id = 1;
+  string project_id = 2;
+  string agent_id = 3;
+  uint32 agent_version = 4;
+  // 模型别名。
+  string model = 5;
+  SessionStatus status = 6;
+  Lifecycle lifecycle = 7;
+  string title = 8;
+  map<string, string> metadata = 9;
+  ForkOrigin forked_from = 10;
+  Actor created_by = 11;
+  // 最新已提交事件的 seq。
+  uint64 last_seq = 12;
+  Usage usage = 13;
+  uint32 pending_tool_calls = 14;
+  string primary_thread_id = 15;
+  google.protobuf.Timestamp created_at = 16;
+  google.protobuf.Timestamp updated_at = 17;
+  google.protobuf.Timestamp last_activity_at = 18;
+  google.protobuf.Timestamp archived_at = 19;
+}
+
+// Thread 是会话内的一条对话上下文。
+message Thread {
+  string id = 1;
+  string session_id = 2;
+  string parent_thread_id = 3;
+  string parent_tool_call_id = 4;
+  // 从 primary 线程到本线程的 ID 列表。
+  repeated string path = 5;
+  uint32 depth = 6;
+  // "main" 或 SubAgent 名。
+  string agent_name = 7;
+  ThreadMode mode = 8;
+  ThreadStatus status = 9;
+  StopReason stop_reason = 10;
+  string current_run_id = 11;
+  string latest_checkpoint_id = 12;
+  uint32 step_count = 13;
+  Usage usage = 14;
+  google.protobuf.Timestamp created_at = 15;
+  google.protobuf.Timestamp updated_at = 16;
+}
+
+// RunError 是 Run 失败的原因（上游错误已脱敏）。
+message RunError {
+  string code = 1;
+  string message = 2;
+}
+
+// Run 是线程从一次触发到重新空闲的一段工作。
+message Run {
+  string id = 1;
+  string session_id = 2;
+  string thread_id = 3;
+  RunTrigger trigger = 4;
+  RunStatus status = 5;
+  StopReason stop_reason = 6;
+  // 模型别名。
+  string model = 7;
+  uint32 step_count = 8;
+  Usage usage = 9;
+  RunError error = 10;
+  google.protobuf.Timestamp started_at = 11;
+  google.protobuf.Timestamp ended_at = 12;
+}
+
+// Checkpoint 是指向某个 Context Root 的命名指针（spec §8）。
+message Checkpoint {
+  string id = 1;
+  string session_id = 2;
+  string thread_id = 3;
+  string run_id = 4;
+  uint64 seq = 5;
+  CheckpointKind kind = 6;
+  bool stable = 7;
+  string context_root = 8;
+  string executor_state_ref = 9;
+  string label = 10;
+  google.protobuf.Timestamp created_at = 11;
+}
+
+// SessionFilter 是 ListSessions 的过滤条件。
+message SessionFilter {
+  repeated SessionStatus statuses = 1;
+  string agent_id = 2;
+  string api_key_id = 3;
+  google.protobuf.Timestamp created_after = 4;
+  google.protobuf.Timestamp created_before = 5;
+  // metadata 包含这些键值对。
+  map<string, string> metadata = 6;
+  // 只看出现过 run.failed 的会话。
+  bool has_error = 7;
+  // 默认只列出 active；为 true 时也包括 archived。
+  bool include_archived = 8;
+}
+
+message CreateSessionRequest {
+  string agent_id = 1;
+  // 0 表示当前版本。
+  uint32 agent_version = 2;
+  // 模型别名；为空时使用 Agent 的默认模型。
+  string model = 3;
+  repeated ToolDefinition tools = 4;
+  // ≤ 32 个键；键 ^[a-zA-Z0-9_.-]{1,64}$，值 ≤ 512 字节。
+  map<string, string> metadata = 5;
+  string title = 6;
+  // 可选：首条消息，带上时立即开始 Run。
+  MessageInput initial_message = 7;
+  // 幂等键：同一项目内重复使用时返回同一会话。
+  string idempotency_key = 8;
+  string project_id = 9;
+  // 首条消息的幂等键。
+  string client_message_id = 10;
+}
+
+message CreateSessionResponse {
+  Session session = 1;
+  string thread_id = 2;
+  // 带首条消息时有值。
+  string run_id = 3;
+  string message_id = 4;
+}
+
+message GetSessionRequest {
+  string project_id = 1;
+  string session_id = 2;
+}
+
+message GetSessionResponse {
+  Session session = 1;
+}
+
+message ListSessionsRequest {
+  string project_id = 1;
+  SessionFilter filter = 2;
+  PageRequest page = 3;
+}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+  PageResponse page = 2;
+}
+
+message SendMessageRequest {
+  string session_id = 1;
+  // 为空时发给 primary 线程。
+  string thread_id = 2;
+  MessageInput message = 3;
+  // 幂等键。
+  string client_message_id = 4;
+  // 可选：只作用于本 Run 的工具集。
+  repeated ToolDefinition tools = 5;
+  // 可选：粘性覆盖会话的模型别名。
+  string model = 6;
+  // 先中断当前 Run，再投递。
+  bool interrupt = 7;
+  string project_id = 8;
+}
+
+message SendMessageResponse {
+  string message_id = 1;
+  string run_id = 2;
+  Delivery delivery = 3;
+}
+
+message InterruptSessionRequest {
+  string project_id = 1;
+  string session_id = 2;
+  // 为空时中断 primary 线程。
+  string thread_id = 3;
+  // 可选：中断后立即作为新 Run 投递的消息。
+  MessageInput then_message = 4;
+  string then_client_message_id = 5;
+  // 是否同时中断后台子线程（前台子线程总是级联中断）。
+  bool cascade_background = 6;
+}
+
+message InterruptSessionResponse {
+  string thread_id = 1;
+  // 线程空闲时为 0（无操作）。
+  uint32 generation = 2;
+  // 带 then_message 时有值。
+  string message_id = 3;
+}
+
+message ForkSessionRequest {
+  string project_id = 1;
+  string checkpoint_id = 2;
+  // 可选：带上时立即开始 Run。
+  MessageInput message = 3;
+  string client_message_id = 4;
+  // 可选：覆盖模型别名。
+  string model = 5;
+  // 可选：覆盖工具集（默认继承源会话）。
+  repeated ToolDefinition tools = 6;
+  map<string, string> metadata = 7;
+  string title = 8;
+  string idempotency_key = 9;
+}
+
+message ForkSessionResponse {
+  Session session = 1;
+  string thread_id = 2;
+  string run_id = 3;
+  string message_id = 4;
+  // checkpoint（或它之前最近一个非空）的 executor_state_ref（spec §8.3）。
+  string executor_state_ref = 5;
+}
+
+message ArchiveSessionRequest {
+  string project_id = 1;
+  string session_id = 2;
+}
+
+message ArchiveSessionResponse {
+  Session session = 1;
+}
+
+message UnarchiveSessionRequest {
+  string project_id = 1;
+  string session_id = 2;
+}
+
+message UnarchiveSessionResponse {
+  Session session = 1;
+}
+
+message DeleteSessionRequest {
+  string project_id = 1;
+  string session_id = 2;
+}
+
+message DeleteSessionResponse {}
+
+message ListThreadsRequest {
+  string project_id = 1;
+  string session_id = 2;
+  PageRequest page = 3;
+}
+
+message ListThreadsResponse {
+  repeated Thread threads = 1;
+  PageResponse page = 2;
+}
+
+message GetRunRequest {
+  string project_id = 1;
+  string run_id = 2;
+}
+
+message GetRunResponse {
+  Run run = 1;
+}
+
+message ListRunsRequest {
+  string project_id = 1;
+  string session_id = 2;
+  // 可选：只看某个线程。
+  string thread_id = 3;
+  PageRequest page = 4;
+}
+
+message ListRunsResponse {
+  repeated Run runs = 1;
+  PageResponse page = 2;
+}
+
+message ListCheckpointsRequest {
+  string project_id = 1;
+  string session_id = 2;
+  string thread_id = 3;
+  CheckpointKind kind = 4;
+  bool stable_only = 5;
+  PageRequest page = 6;
+}
+
+message ListCheckpointsResponse {
+  repeated Checkpoint checkpoints = 1;
+  PageResponse page = 2;
+}
+
+message AnnotateCheckpointRequest {
+  string project_id = 1;
+  string checkpoint_id = 2;
+  // ≤ 1KB，平台不解释。
+  string executor_state_ref = 3;
+}
+
+message AnnotateCheckpointResponse {
+  Checkpoint checkpoint = 1;
+}

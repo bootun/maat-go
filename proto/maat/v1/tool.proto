@@ -1,0 +1,172 @@
+syntax = "proto3";
+
+package maat.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "maat/v1/common.proto";
+
+// ToolService 是调用方（Executor）认领并回传工具调用的接口（spec §6.3）。
+service ToolService {
+  // ClaimToolCall 认领一个 pending 的工具调用：pending → claimed，返回租约与完整参数。
+  rpc ClaimToolCall(ClaimToolCallRequest) returns (ClaimToolCallResponse);
+  // RenewToolCallLease 续约，lease_seconds 上限 600。
+  rpc RenewToolCallLease(RenewToolCallLeaseRequest) returns (RenewToolCallLeaseResponse);
+  // SubmitToolResult 回传结果；pending 且未带 lease_token 时视为隐式认领。
+  rpc SubmitToolResult(SubmitToolResultRequest) returns (SubmitToolResultResponse);
+  // SubmitToolResults 批量回传，逐条独立判定。
+  rpc SubmitToolResults(SubmitToolResultsRequest) returns (SubmitToolResultsResponse);
+  // ListPendingToolCalls 列出 pending 与 claimed 的调用，供后接入或错过事件的 Executor 补偿拉取。
+  rpc ListPendingToolCalls(ListPendingToolCallsRequest) returns (ListPendingToolCallsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// ToolDefinition 是调用方声明的工具（spec §6.1）。
+message ToolDefinition {
+  // ^[a-zA-Z0-9_-]{1,64}$，不得使用保留名 spawn_agent 和前缀 maat_。
+  string name = 1;
+  string description = 2;
+  // JSON Schema（type=object），序列化后 ≤ 64KB。
+  google.protobuf.Struct parameters = 3;
+  // 是否允许在执行器掉线后重新派发，默认 false。
+  bool idempotent = 4;
+  // 给 Executor 的建议超时，平台不强制。
+  uint32 timeout_seconds = 5;
+  // 送入模型的结果截断阈值，0 表示默认 32KB。
+  uint32 max_model_result_bytes = 6;
+}
+
+// ToolResult 是工具执行结果（spec §6.3）。Phase 1 不支持图片。
+message ToolResult {
+  repeated ContentPart content = 1;
+  bool is_error = 2;
+}
+
+// ToolCallStatus 是工具调用状态（spec §4.3；RUNNING 用于 PLATFORM 类的前台 spawn）。
+enum ToolCallStatus {
+  TOOL_CALL_STATUS_UNSPECIFIED = 0;
+  TOOL_CALL_STATUS_PENDING = 1;
+  TOOL_CALL_STATUS_CLAIMED = 2;
+  TOOL_CALL_STATUS_RUNNING = 3;
+  TOOL_CALL_STATUS_COMPLETED = 4;
+  TOOL_CALL_STATUS_FAILED = 5;
+  TOOL_CALL_STATUS_CANCELLED = 6;
+}
+
+// ToolCallKind 区分由调用方执行（CLIENT）还是由平台执行（PLATFORM，即 spawn_agent）。
+enum ToolCallKind {
+  TOOL_CALL_KIND_UNSPECIFIED = 0;
+  TOOL_CALL_KIND_CLIENT = 1;
+  TOOL_CALL_KIND_PLATFORM = 2;
+}
+
+// ToolCall 是工具调用的公开视图（不含租约 token）。
+message ToolCall {
+  string id = 1;
+  string session_id = 2;
+  string thread_id = 3;
+  string run_id = 4;
+  string step_id = 5;
+  // 在模型给出的调用列表中的位置。
+  uint32 ordinal = 6;
+  // 模型返回的调用 ID。
+  string model_call_id = 7;
+  string name = 8;
+  ToolCallKind kind = 9;
+  // 参数 ≤ 64KB 时内联，否则只给 args_ref（认领时返回完整参数）。
+  google.protobuf.Struct args = 10;
+  string args_ref = 11;
+  bool idempotent = 12;
+  ToolCallStatus status = 13;
+  // 认领者（claimed / completed 时有值）。
+  string executor_id = 14;
+  google.protobuf.Timestamp lease_expires_at = 15;
+  uint32 dispatch_attempt = 16;
+  string result_ref = 17;
+  bool is_error = 18;
+  // executor_lost / timeout / unknown_tool / invalid_arguments / arguments_truncated 等。
+  string failure_reason = 19;
+  // 从 primary 线程到本线程的 ID 列表。
+  repeated string thread_path = 20;
+  // 所属 step span 的 W3C traceparent，SDK 以它为父创建工具执行 span。
+  string traceparent = 21;
+  google.protobuf.Timestamp created_at = 22;
+  google.protobuf.Timestamp completed_at = 23;
+}
+
+message ClaimToolCallRequest {
+  string tool_call_id = 1;
+  // 以 exe_ 开头，由 SDK 进程生成。
+  string executor_id = 2;
+  // 默认 60，范围 [10, 600]。
+  uint32 lease_seconds = 3;
+}
+
+message ClaimToolCallResponse {
+  ToolCall tool_call = 1;
+  string lease_token = 2;
+  google.protobuf.Timestamp lease_expires_at = 3;
+  // 完整参数（即使事件中只给了 args_ref）。
+  google.protobuf.Struct args = 4;
+}
+
+message RenewToolCallLeaseRequest {
+  string tool_call_id = 1;
+  string lease_token = 2;
+  uint32 lease_seconds = 3;
+}
+
+message RenewToolCallLeaseResponse {
+  google.protobuf.Timestamp lease_expires_at = 1;
+}
+
+message SubmitToolResultRequest {
+  string tool_call_id = 1;
+  // 未带 token 且调用为 pending 时视为隐式认领。
+  string lease_token = 2;
+  ToolResult result = 3;
+  // 不透明字符串（≤ 1KB），附加到这些结果被并入时生成的 checkpoint 上（spec §8.4）。
+  string executor_state_ref = 4;
+  // 回传者；用于隐式认领与同一执行器重复提交的幂等判定。
+  string executor_id = 5;
+}
+
+message SubmitToolResultResponse {
+  ToolCall tool_call = 1;
+}
+
+message SubmitToolResultsRequest {
+  repeated SubmitToolResultRequest results = 1;
+}
+
+// SubmitToolResultOutcome 是批量回传中单条的结果。
+message SubmitToolResultOutcome {
+  string tool_call_id = 1;
+  // 成功时有值。
+  ToolCall tool_call = 2;
+  // 失败时为 Connect 错误码（如 "failed_precondition"）与 ErrorInfo。
+  string error_code = 3;
+  string error_message = 4;
+  ErrorInfo error_info = 5;
+}
+
+message SubmitToolResultsResponse {
+  repeated SubmitToolResultOutcome outcomes = 1;
+}
+
+message ListPendingToolCallsRequest {
+  // 为空时取 API Key 绑定的项目。
+  string project_id = 1;
+  // 为空时列出项目内所有会话。
+  string session_id = 2;
+  string thread_id = 3;
+  // 只列出这些工具名。
+  repeated string names = 4;
+  PageRequest page = 5;
+}
+
+message ListPendingToolCallsResponse {
+  repeated ToolCall tool_calls = 1;
+  PageResponse page = 2;
+}

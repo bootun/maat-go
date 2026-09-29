@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package maat.v1;
+
+// MetaService 提供与业务无关的元信息接口（plan S1）。
+service MetaService {
+  // WhoAmI 返回当前调用者的身份，用作 SDK 的连通性检查。
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// PrincipalKind 是调用者的类型。
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  // 平台 API Key。
+  PRINCIPAL_KIND_API_KEY = 1;
+  // 控制台登录用户。
+  PRINCIPAL_KIND_CONSOLE_USER = 2;
+}
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+  PrincipalKind kind = 1;
+  // API Key ID（key_…）或用户 ID（usr_…）。
+  string id = 2;
+  // API Key 名称或用户显示名。
+  string name = 3;
+  string org_id = 4;
+  // API Key 绑定的项目；控制台用户为空。
+  string project_id = 5;
+  // API Key 的 scopes，例如 "sessions:write"。
+  repeated string scopes = 6;
+}

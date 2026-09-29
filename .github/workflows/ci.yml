@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (gen-check · lint · test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Cache tools
+        id: tools-cache
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: tools-${{ runner.os }}-${{ hashFiles('Makefile') }}
+      - name: Install tools
+        if: steps.tools-cache.outputs.cache-hit != 'true'
+        run: make tools
+      - name: make verify
+        run: make verify
+
+  # 针对后端的 docker compose 环境运行集成测试。后端仓库不公开，
+  # 需要仓库 secret MAAT_BACKEND_TOKEN（对 bootun/maat 有只读权限）；未配置时跳过。
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      HAS_BACKEND_TOKEN: ${{ secrets.MAAT_BACKEND_TOKEN != '' }}
+    steps:
+      - name: Skip without backend access
+        if: env.HAS_BACKEND_TOKEN != 'true'
+        run: echo "::notice::MAAT_BACKEND_TOKEN is not configured; skipping integration tests"
+      - uses: actions/checkout@v5
+        if: env.HAS_BACKEND_TOKEN == 'true'
+      - uses: actions/checkout@v5
+        if: env.HAS_BACKEND_TOKEN == 'true'
+        with:
+          repository: bootun/maat
+          token: ${{ secrets.MAAT_BACKEND_TOKEN }}
+          path: .maat
+      - uses: actions/setup-go@v6
+        if: env.HAS_BACKEND_TOKEN == 'true'
+        with:
+          go-version-file: go.mod
+      - name: Start backend
+        if: env.HAS_BACKEND_TOKEN == 'true'
+        run: make -C .maat up
+      - name: make test-integration
+        if: env.HAS_BACKEND_TOKEN == 'true'
+        run: make test-integration MAAT_DIR=.maat
+      - name: Collect container logs
+        if: always() && env.HAS_BACKEND_TOKEN == 'true'
+        run: docker compose -f .maat/deploy/docker-compose.yaml logs --no-color > compose-logs.txt 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always() && env.HAS_BACKEND_TOKEN == 'true'
+        with:
+          name: compose-logs
+          path: compose-logs.txt

@@ -1,0 +1,15 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    # 生成到本仓库的 gen/ 下，SDK 不依赖闭源的后端仓库（见 README「生成代码」）。
+    - file_option: go_package_prefix
+      value: github.com/bootun/maat-go/gen
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: module=github.com/bootun/maat-go/gen
+  - local: protoc-gen-connect-go
+    out: gen
+    opt: module=github.com/bootun/maat-go/gen

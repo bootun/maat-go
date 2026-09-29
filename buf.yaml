@@ -1,0 +1,10 @@
+# proto/ 下是后端公开 API（maat.v1）中 SDK 用到的文件，由 `make sync-proto` 从后端仓库同步，不要手改。
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - WIRE_JSON

@@ -1,0 +1,54 @@
+# golangci-lint v2 配置。
+version: "2"
+
+run:
+  build-tags: [integration]
+
+linters:
+  default: standard # errcheck、govet、ineffassign、staticcheck、unused
+  enable:
+    - errorlint
+    - nilerr
+    - nolintlint
+    - bodyclose
+    - noctx
+    - forbidigo
+  settings:
+    errcheck:
+      # `_ = f()` 也算未处理；确需忽略时写 //nolint:errcheck // 原因。
+      check-blank: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: SDK 不打印输出
+        - pattern: ^log\..*$
+          pkg: ^log$
+          msg: SDK 不使用标准库 log
+        - pattern: ^http\.DefaultClient$
+          msg: 使用 Client 配置的 http.Client
+        - pattern: ^http\.(Get|Post|Head|PostForm)$
+          msg: 不要使用 http.DefaultClient 的便捷函数
+        - pattern: ^os\.Exit$
+          msg: SDK 不退出进程
+  exclusions:
+    generated: strict
+    presets:
+      - std-error-handling
+    rules:
+      - linters: [forbidigo]
+        path: ^examples/
+      - linters: [noctx, bodyclose]
+        path: _test\.go
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/bootun/maat-go

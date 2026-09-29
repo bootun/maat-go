@@ -1,0 +1,319 @@
+package maat
+
+import (
+	"context"
+	"fmt"
+	"iter"
+	"time"
+
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/structpb"
+
+	maatv1 "github.com/bootun/maat-go/gen/maat/v1"
+)
+
+// Sessions 管理会话。
+type Sessions struct{ c *Client }
+
+// CreateSessionParams 是创建会话的参数。
+type CreateSessionParams struct {
+	// Agent 是 Agent ID（agt_…），必填。
+	Agent string
+	// AgentVersion 是 Agent 的版本；0 表示当前版本。
+	AgentVersion uint32
+	// Model 是模型别名；为空时使用 Agent 的默认模型。SDK 中只出现别名，不出现 LLM 的地址与密钥。
+	Model string
+	Title string
+	// Metadata 最多 32 个键；键匹配 ^[a-zA-Z0-9_.-]{1,64}$，值不超过 512 字节。
+	Metadata map[string]string
+	// IdempotencyKey 是幂等键：同一项目内重复使用时返回同一会话。为空时 SDK 生成一个，
+	// 保证内部重试不会重复创建。
+	IdempotencyKey string
+	// TODO(M2-10)：Tools []Tool。
+}
+
+// Create 创建会话（不带首条消息，会话处于空闲状态），之后用 Session.Send 发送消息。
+func (s *Sessions) Create(ctx context.Context, p CreateSessionParams) (*Session, error) {
+	key := p.IdempotencyKey
+	if key == "" {
+		key = newIdempotencyKey()
+	}
+	req := &maatv1.CreateSessionRequest{
+		AgentId: p.Agent, AgentVersion: p.AgentVersion, Model: p.Model, Title: p.Title, Metadata: p.Metadata,
+		IdempotencyKey: key,
+	}
+	var res *maatv1.CreateSessionResponse
+	err := s.c.call(ctx, true, func(ctx context.Context) error {
+		r, err := s.c.sessions.CreateSession(ctx, connect.NewRequest(req))
+		if err != nil {
+			return err
+		}
+		res = r.Msg
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.c.sessionOf(res.GetSession()), nil
+}
+
+// Get 读取会话的最新状态。
+func (s *Sessions) Get(ctx context.Context, id string) (*Session, error) {
+	var res *maatv1.GetSessionResponse
+	err := s.c.call(ctx, true, func(ctx context.Context) error {
+		r, err := s.c.sessions.GetSession(ctx, connect.NewRequest(&maatv1.GetSessionRequest{SessionId: id}))
+		if err != nil {
+			return err
+		}
+		res = r.Msg
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.c.sessionOf(res.GetSession()), nil
+}
+
+// ListSessionsParams 是列出会话的过滤条件。
+type ListSessionsParams struct {
+	Statuses []SessionStatus
+	AgentID  string
+	// Metadata 过滤 metadata 中包含这些键值对的会话。
+	Metadata map[string]string
+	// IncludeArchived 为真时也列出已归档的会话。
+	IncludeArchived bool
+	// PageSize 是每次请求的条数；0 表示使用平台默认值。
+	PageSize uint32
+}
+
+// List 按创建时间倒序列出会话，自动翻页。
+func (s *Sessions) List(ctx context.Context, p ListSessionsParams) iter.Seq2[*Session, error] {
+	filter := &maatv1.SessionFilter{AgentId: p.AgentID, Metadata: p.Metadata, IncludeArchived: p.IncludeArchived}
+	for _, st := range p.Statuses {
+		filter.Statuses = append(filter.Statuses, sessionStatusToProto[st])
+	}
+	return func(yield func(*Session, error) bool) {
+		token := ""
+		for {
+			var res *maatv1.ListSessionsResponse
+			err := s.c.call(ctx, true, func(ctx context.Context) error {
+				r, err := s.c.sessions.ListSessions(ctx, connect.NewRequest(&maatv1.ListSessionsRequest{
+					Filter: filter, Page: &maatv1.PageRequest{PageSize: p.PageSize, PageToken: token},
+				}))
+				if err != nil {
+					return err
+				}
+				res = r.Msg
+				return nil
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			for _, ps := range res.GetSessions() {
+				if !yield(s.c.sessionOf(ps), nil) {
+					return
+				}
+			}
+			if token = res.GetPage().GetNextPageToken(); token == "" {
+				return
+			}
+		}
+	}
+}
+
+var sessionStatusToProto = map[SessionStatus]maatv1.SessionStatus{
+	SessionIdle:           maatv1.SessionStatus_SESSION_STATUS_IDLE,
+	SessionRunning:        maatv1.SessionStatus_SESSION_STATUS_RUNNING,
+	SessionRequiresAction: maatv1.SessionStatus_SESSION_STATUS_REQUIRES_ACTION,
+}
+
+// Session 是一个会话。字段是获取时的快照，最新状态用 Sessions.Get 重新读取。
+type Session struct {
+	ID           string
+	AgentID      string
+	AgentVersion uint32
+	// Model 是模型别名。
+	Model    string
+	Status   SessionStatus
+	Title    string
+	Metadata map[string]string
+	// PrimaryThreadID 是主线程；Send 不指定线程时发给它。
+	PrimaryThreadID string
+	// LastSeq 是获取快照时最新已提交事件的 seq。
+	LastSeq          uint64
+	PendingToolCalls uint32
+	Usage            Usage
+	Archived         bool
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+
+	c *Client
+}
+
+func (c *Client) sessionOf(p *maatv1.Session) *Session {
+	return &Session{
+		ID: p.GetId(), AgentID: p.GetAgentId(), AgentVersion: p.GetAgentVersion(), Model: p.GetModel(),
+		Status: enumOf[SessionStatus](p.GetStatus(), "SESSION_STATUS_"), Title: p.GetTitle(), Metadata: p.GetMetadata(),
+		PrimaryThreadID: p.GetPrimaryThreadId(), LastSeq: p.GetLastSeq(), PendingToolCalls: p.GetPendingToolCalls(),
+		Usage: usageOf(p.GetUsage()), Archived: p.GetLifecycle() == maatv1.Lifecycle_LIFECYCLE_ARCHIVED,
+		CreatedAt: p.GetCreatedAt().AsTime(), UpdatedAt: p.GetUpdatedAt().AsTime(), c: c,
+	}
+}
+
+// MessageInput 是发送给 Agent 的消息。Phase 1 只支持文本与 JSON。
+type MessageInput struct {
+	Parts []ContentPart
+}
+
+// ContentPart 是消息中的一段内容：Text 与 JSON 二选一（JSON 非空时使用 JSON）。
+type ContentPart struct {
+	Text string
+	// JSON 是结构化内容，值必须能表示为 JSON（string、float64、bool、nil、[]any、map[string]any 等）。
+	JSON map[string]any
+}
+
+// TextMessage 构造只有一段文本的消息。
+func TextMessage(text string) MessageInput { return MessageInput{Parts: []ContentPart{{Text: text}}} }
+
+func (m MessageInput) toProto() (*maatv1.MessageInput, error) {
+	out := &maatv1.MessageInput{Parts: make([]*maatv1.ContentPart, 0, len(m.Parts))}
+	for i, p := range m.Parts {
+		if p.JSON == nil {
+			out.Parts = append(out.Parts, &maatv1.ContentPart{Part: &maatv1.ContentPart_Text{Text: p.Text}})
+			continue
+		}
+		v, err := structpb.NewStruct(p.JSON)
+		if err != nil {
+			return nil, fmt.Errorf("maat: message part %d is not valid JSON: %w", i, err)
+		}
+		out.Parts = append(out.Parts, &maatv1.ContentPart{Part: &maatv1.ContentPart_Json{Json: v}})
+	}
+	return out, nil
+}
+
+// SendOption 配置 Send。
+type SendOption func(*sendOptions)
+
+type sendOptions struct {
+	clientMessageID string
+	threadID        string
+	model           string
+}
+
+// WithClientMessageID 设置消息的幂等键：重复发送同一 ID 只会投递一次。为空时 SDK 生成一个，
+// 保证内部重试不会重复投递。
+func WithClientMessageID(id string) SendOption {
+	return func(o *sendOptions) { o.clientMessageID = id }
+}
+
+// WithThread 把消息发给指定线程（默认发给主线程）。
+func WithThread(threadID string) SendOption { return func(o *sendOptions) { o.threadID = threadID } }
+
+// WithModel 从这条消息起把会话的模型别名切换为 alias（之后的消息沿用）。
+func WithModel(alias string) SendOption { return func(o *sendOptions) { o.model = alias } }
+
+// Send 发送一条文本消息，返回处理它的 Run。线程空闲时开启新 Run；线程运行中调用即为插入消息，
+// 返回的是正在运行的 Run（Run.Delivery 为 DeliveryInserted）。
+func (s *Session) Send(ctx context.Context, text string, opts ...SendOption) (*Run, error) {
+	return s.SendInput(ctx, TextMessage(text), opts...)
+}
+
+// SendInput 与 Send 相同，但消息可以包含多段文本与 JSON。
+func (s *Session) SendInput(ctx context.Context, in MessageInput, opts ...SendOption) (*Run, error) {
+	var o sendOptions
+	for _, f := range opts {
+		f(&o)
+	}
+	if o.clientMessageID == "" {
+		o.clientMessageID = newIdempotencyKey()
+	}
+	msg, err := in.toProto()
+	if err != nil {
+		return nil, err
+	}
+	req := &maatv1.SendMessageRequest{
+		SessionId: s.ID, ThreadId: o.threadID, Message: msg, ClientMessageId: o.clientMessageID, Model: o.model,
+	}
+	var res *maatv1.SendMessageResponse
+	err = s.c.call(ctx, true, func(ctx context.Context) error {
+		r, err := s.c.sessions.SendMessage(ctx, connect.NewRequest(req))
+		if err != nil {
+			return err
+		}
+		res = r.Msg
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	thread := o.threadID
+	if thread == "" {
+		thread = s.PrimaryThreadID
+	}
+	return &Run{
+		ID: res.GetRunId(), SessionID: s.ID, ThreadID: thread, MessageID: res.GetMessageId(),
+		Delivery: enumOf[Delivery](res.GetDelivery(), "DELIVERY_"), c: s.c, afterSeq: s.LastSeq,
+	}, nil
+}
+
+// historyPageSize 是 History 每次请求的条数（平台上限 500）。
+const historyPageSize = 200
+
+// History 按 seq 顺序读取 seq > afterSeq 的已提交事件，自动翻页（spec §11.6）。
+// 历史中每个 step 只有成功那次 attempt 的内容，不需要对账。
+func (s *Session) History(ctx context.Context, afterSeq uint64) iter.Seq2[RawEvent, error] {
+	return func(yield func(RawEvent, error) bool) {
+		token := ""
+		for {
+			var res *maatv1.ListSessionEventsResponse
+			err := s.c.call(ctx, true, func(ctx context.Context) error {
+				r, err := s.c.events.ListSessionEvents(ctx, connect.NewRequest(&maatv1.ListSessionEventsRequest{
+					SessionId: s.ID, AfterSeq: afterSeq, Page: &maatv1.PageRequest{PageSize: historyPageSize, PageToken: token},
+				}))
+				if err != nil {
+					return err
+				}
+				res = r.Msg
+				return nil
+			})
+			if err != nil {
+				yield(RawEvent{}, err)
+				return
+			}
+			for _, e := range res.GetEvents() {
+				if !yield(RawEvent{Event: e}, nil) {
+					return
+				}
+			}
+			if token = res.GetPage().GetNextPageToken(); token == "" {
+				return
+			}
+		}
+	}
+}
+
+// Stream 订阅会话的全部事件：先补齐 AfterSeq（默认 0）之后的历史，再接实时流，断线后自动续传。
+// 它产出对账后的高层事件（见 Event），直到 ctx 结束（产出 ctx 的错误）或出现不可重试的错误。
+func (s *Session) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Event, error] {
+	o := newStreamOptions(opts)
+	return func(yield func(Event, error) bool) {
+		rec := NewReconciler()
+		for raw, err := range s.c.subscribe(ctx, subscription{
+			sessionID: s.ID, afterSeq: o.afterSeq, token: o.resumeToken, includeDeltas: !o.noDeltas,
+		}) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if o.raw && !yield(raw, nil) {
+				return
+			}
+			for _, ev := range rec.Apply(raw.Event) {
+				if !yield(ev, nil) {
+					return
+				}
+			}
+		}
+	}
+}
