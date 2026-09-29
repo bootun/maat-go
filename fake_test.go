@@ -2,6 +2,7 @@ package maat
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	maatv1 "github.com/bootun/maat-go/gen/maat/v1"
 	"github.com/bootun/maat-go/gen/maat/v1/maatv1connect"
@@ -19,6 +21,7 @@ type fakeBackend struct {
 	maatv1connect.UnimplementedMetaServiceHandler
 	maatv1connect.UnimplementedSessionServiceHandler
 	maatv1connect.UnimplementedEventServiceHandler
+	maatv1connect.UnimplementedToolServiceHandler
 
 	whoAmI     func(ctx context.Context, req *connect.Request[maatv1.WhoAmIRequest]) (*connect.Response[maatv1.WhoAmIResponse], error)
 	create     func(req *maatv1.CreateSessionRequest) (*maatv1.CreateSessionResponse, error)
@@ -26,6 +29,11 @@ type fakeBackend struct {
 	list       func(req *maatv1.ListSessionsRequest) (*maatv1.ListSessionsResponse, error)
 	send       func(req *maatv1.SendMessageRequest) (*maatv1.SendMessageResponse, error)
 	listEvents func(req *maatv1.ListSessionEventsRequest) (*maatv1.ListSessionEventsResponse, error)
+	interrupt  func(req *maatv1.InterruptSessionRequest) (*maatv1.InterruptSessionResponse, error)
+	claim      func(req *maatv1.ClaimToolCallRequest) (*maatv1.ClaimToolCallResponse, error)
+	renew      func(req *maatv1.RenewToolCallLeaseRequest) (*maatv1.RenewToolCallLeaseResponse, error)
+	submit     func(req *maatv1.SubmitToolResultRequest) (*maatv1.SubmitToolResultResponse, error)
+	pending    func(req *maatv1.ListPendingToolCallsRequest) (*maatv1.ListPendingToolCallsResponse, error)
 	// conns[i] 是第 i 个事件流连接的行为；超出时连接一直保持到客户端断开。
 	conns []func(ctx context.Context, st *connect.ServerStream[maatv1.StreamSessionEventsResponse]) error
 
@@ -56,6 +64,26 @@ func (f *fakeBackend) SendMessage(_ context.Context, req *connect.Request[maatv1
 
 func (f *fakeBackend) ListSessionEvents(_ context.Context, req *connect.Request[maatv1.ListSessionEventsRequest]) (*connect.Response[maatv1.ListSessionEventsResponse], error) {
 	return respond(f.listEvents(req.Msg))
+}
+
+func (f *fakeBackend) InterruptSession(_ context.Context, req *connect.Request[maatv1.InterruptSessionRequest]) (*connect.Response[maatv1.InterruptSessionResponse], error) {
+	return respond(f.interrupt(req.Msg))
+}
+
+func (f *fakeBackend) ClaimToolCall(_ context.Context, req *connect.Request[maatv1.ClaimToolCallRequest]) (*connect.Response[maatv1.ClaimToolCallResponse], error) {
+	return respond(f.claim(req.Msg))
+}
+
+func (f *fakeBackend) RenewToolCallLease(_ context.Context, req *connect.Request[maatv1.RenewToolCallLeaseRequest]) (*connect.Response[maatv1.RenewToolCallLeaseResponse], error) {
+	return respond(f.renew(req.Msg))
+}
+
+func (f *fakeBackend) SubmitToolResult(_ context.Context, req *connect.Request[maatv1.SubmitToolResultRequest]) (*connect.Response[maatv1.SubmitToolResultResponse], error) {
+	return respond(f.submit(req.Msg))
+}
+
+func (f *fakeBackend) ListPendingToolCalls(_ context.Context, req *connect.Request[maatv1.ListPendingToolCallsRequest]) (*connect.Response[maatv1.ListPendingToolCallsResponse], error) {
+	return respond(f.pending(req.Msg))
 }
 
 func (f *fakeBackend) StreamSessionEvents(ctx context.Context, req *connect.Request[maatv1.StreamSessionEventsRequest],
@@ -98,9 +126,11 @@ func newTestClient(t *testing.T, f *fakeBackend) *Client {
 	mux.Handle(maatv1connect.NewMetaServiceHandler(f))
 	mux.Handle(maatv1connect.NewSessionServiceHandler(f))
 	mux.Handle(maatv1connect.NewEventServiceHandler(f))
+	mux.Handle(maatv1connect.NewToolServiceHandler(f))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	c := NewClient(WithBaseURL(srv.URL), WithAPIKey("test-key"), WithHTTPClient(srv.Client()))
+	c := NewClient(WithBaseURL(srv.URL), WithAPIKey("test-key"), WithHTTPClient(srv.Client()),
+		WithLogger(slog.New(slog.DiscardHandler)))
 	c.cfg.retry = backoff{min: time.Millisecond, max: time.Millisecond}
 	c.cfg.reconnect = backoff{min: time.Millisecond, max: 5 * time.Millisecond}
 	return c
@@ -153,4 +183,33 @@ func runCompleted(seq uint64, run string) *maatv1.Event {
 func runFailed(seq uint64, run, code, msg string) *maatv1.Event {
 	return &maatv1.Event{Seq: seq, Type: "run.failed", ThreadId: "thr_1", RunId: run,
 		Payload: &maatv1.Event_RunFailed{RunFailed: &maatv1.RunFailed{Code: code, Message: msg}}}
+}
+
+// 以下是工具调用相关的事件。
+
+func toolCall(seq uint64, run, id, name string, args map[string]any, attempt uint32) *maatv1.Event {
+	st, err := structpb.NewStruct(args)
+	if err != nil {
+		panic(err)
+	}
+	return &maatv1.Event{Seq: seq, Type: "agent.tool_call", ThreadId: "thr_1", RunId: run, StepId: "stp_1",
+		Payload: &maatv1.Event_AgentToolCall{AgentToolCall: &maatv1.AgentToolCall{ToolCall: &maatv1.ToolCall{
+			Id: id, RunId: run, ThreadId: "thr_1", StepId: "stp_1", Name: name, Kind: maatv1.ToolCallKind_TOOL_CALL_KIND_CLIENT,
+			Args: st, Status: maatv1.ToolCallStatus_TOOL_CALL_STATUS_PENDING, DispatchAttempt: attempt,
+		}}}}
+}
+
+func toolCompleted(seq uint64, run, id string) *maatv1.Event {
+	return &maatv1.Event{Seq: seq, Type: "tool_call.completed", ThreadId: "thr_1", RunId: run, StepId: "stp_1",
+		Payload: &maatv1.Event_ToolCallCompleted{ToolCallCompleted: &maatv1.ToolCallCompleted{ToolCallId: id}}}
+}
+
+func toolCancelled(seq uint64, run, id string) *maatv1.Event {
+	return &maatv1.Event{Seq: seq, Type: "tool_call.cancelled", ThreadId: "thr_1", RunId: run, StepId: "stp_1",
+		Payload: &maatv1.Event_ToolCallCancelled{ToolCallCancelled: &maatv1.ToolCallCancelled{ToolCallId: id, Reason: "interrupted"}}}
+}
+
+func toolReopened(seq uint64, run, id string, attempt uint32) *maatv1.Event {
+	return &maatv1.Event{Seq: seq, Type: "tool_call.reopened", ThreadId: "thr_1", RunId: run, StepId: "stp_1",
+		Payload: &maatv1.Event_ToolCallReopened{ToolCallReopened: &maatv1.ToolCallReopened{ToolCallId: id, DispatchAttempt: attempt}}}
 }

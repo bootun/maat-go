@@ -16,6 +16,9 @@
 //
 // 事件流在断线后自动续传；Stream 产出的是按 spec §11.5 对账后的高层事件，
 // 原始事件可以通过 WithRawEvents 一并取得。
+//
+// 调用方工具用 NewTool 声明（CreateSessionParams.Tools、WithTools），Run.Stream 与 Run.Wait 自动认领、执行、
+// 续约并回传；只执行工具、不发送消息的进程使用 Client.Executor（Executor 模式）。
 package maat
 
 import (
@@ -36,7 +39,7 @@ import (
 )
 
 // Version 是 SDK 的版本，写在 User-Agent 中。
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Client 是 maat 平台的客户端，可以并发使用。
 type Client struct {
@@ -49,6 +52,9 @@ type Client struct {
 	meta     maatv1connect.MetaServiceClient
 	sessions maatv1connect.SessionServiceClient
 	events   maatv1connect.EventServiceClient
+	tools    maatv1connect.ToolServiceClient
+	// executorID 标识本 Client 的工具执行器（exe_ 前缀），用于认领与回传。
+	executorID string
 }
 
 // NewClient 构造 Client。未通过 Option 设置的地址与 API Key 从环境变量 MAAT_BASE_URL、MAAT_API_KEY 读取；
@@ -64,7 +70,7 @@ func NewClient(opts ...Option) *Client {
 	if cfg.apiKey == "" {
 		cfg.apiKey = os.Getenv(EnvAPIKey)
 	}
-	c := &Client{cfg: cfg}
+	c := &Client{cfg: cfg, executorID: "exe_" + rand.Text()}
 	c.Sessions = &Sessions{c: c}
 	base, err := normalizeBaseURL(cfg.baseURL)
 	if err == nil && cfg.apiKey == "" {
@@ -75,6 +81,7 @@ func NewClient(opts ...Option) *Client {
 	c.meta = maatv1connect.NewMetaServiceClient(cfg.httpClient, base, ic)
 	c.sessions = maatv1connect.NewSessionServiceClient(cfg.httpClient, base, ic)
 	c.events = maatv1connect.NewEventServiceClient(cfg.httpClient, base, ic)
+	c.tools = maatv1connect.NewToolServiceClient(cfg.httpClient, base, ic)
 	return c
 }
 

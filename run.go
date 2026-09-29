@@ -19,6 +19,8 @@ type Run struct {
 	c *Client
 	// afterSeq 是订阅的起点：发送消息前会话快照的 LastSeq，Run 的事件都在它之后。
 	afterSeq uint64
+	// tools 是 Stream 自动执行的工具。
+	tools []Tool
 
 	mu     sync.Mutex
 	result *Result
@@ -44,9 +46,26 @@ type Result struct {
 //
 // 对于插入到运行中 Run 的消息（DeliveryInserted），Stream 从发送前的会话位置开始，
 // 此前已产生的事件不会重放。
+//
+// 迭代期间，Stream 自动执行该 Run 中注册了实现的工具调用（Session.Tools 或 WithTools）：认领、执行、
+// 续约、回传（WithAutoExecute(false) 关闭）。工具在后台执行，不必等待迭代；迭代结束时（Run 结束或提前退出）
+// 取消仍在执行的工具并等待它们返回。
 func (r *Run) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Event, error] {
 	o := newStreamOptions(opts)
 	return func(yield func(Event, error) bool) {
+		if len(r.tools) > 0 && !o.noAutoExecute {
+			if r.c.err != nil {
+				yield(nil, r.c.err)
+				return
+			}
+			ex, err := newExecutor(ctx, r.c, r.tools)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			defer ex.close()
+			o.executor = ex
+		}
 		rec := NewReconciler()
 		acc := Result{RunID: r.ID}
 		for raw, err := range r.c.subscribe(ctx, subscription{
@@ -58,6 +77,9 @@ func (r *Run) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Event,
 			}
 			if raw.GetRunId() != r.ID && !isStreamControl(raw.Event) {
 				continue
+			}
+			if o.executor != nil {
+				o.executor.handle(raw.Event)
 			}
 			if o.raw && !yield(raw, nil) {
 				return
@@ -112,11 +134,12 @@ func (r *Run) cachedResult() (Result, bool) {
 
 // Wait 等待 Run 结束并返回结果。Run 失败（run.failed）不算调用错误：err 为 nil，Result.Error 有值；
 // err 只表示订阅本身失败（ctx 结束、认证失败等）。Stream 已经读到结束时直接返回缓存的结果。
-func (r *Run) Wait(ctx context.Context) (Result, error) {
+// 与 Stream 一样默认自动执行工具调用，可以传入 WithAutoExecute(false)。
+func (r *Run) Wait(ctx context.Context, opts ...StreamOption) (Result, error) {
 	if res, ok := r.cachedResult(); ok {
 		return res, nil
 	}
-	for _, err := range r.Stream(ctx, WithoutDeltas()) {
+	for _, err := range r.Stream(ctx, append([]StreamOption{WithoutDeltas()}, opts...)...) {
 		if err != nil {
 			return Result{}, err
 		}

@@ -120,6 +120,53 @@ func TestReconciler(t *testing.T) {
 	}
 }
 
+// 工具调用事件转换为 ToolCallEvent；后续事件不带工具名，由对账器按调用 ID 补上。
+func TestReconcilerToolCalls(t *testing.T) {
+	const r = "run_1"
+	ev := func(seq uint64, e *maatv1.Event) *maatv1.Event {
+		e.Seq, e.ThreadId, e.RunId, e.StepId = seq, "thr_1", r, "stp_1"
+		return e
+	}
+	in := []*maatv1.Event{
+		toolCall(1, r, "tc_1", "read_file", map[string]any{"path": "a"}, 0),
+		ev(2, &maatv1.Event{Type: "tool_call.claimed", Payload: &maatv1.Event_ToolCallClaimed{ToolCallClaimed: &maatv1.ToolCallClaimed{ToolCallId: "tc_1", ExecutorId: "exe_1"}}}),
+		ev(3, &maatv1.Event{Type: "tool_call.reopened", Payload: &maatv1.Event_ToolCallReopened{ToolCallReopened: &maatv1.ToolCallReopened{ToolCallId: "tc_1", DispatchAttempt: 1}}}),
+		ev(4, &maatv1.Event{Type: "tool_call.failed", Payload: &maatv1.Event_ToolCallFailed{ToolCallFailed: &maatv1.ToolCallFailed{ToolCallId: "tc_1", Reason: "executor_lost", Message: "gone"}}}),
+		ev(5, &maatv1.Event{Type: "tool_call.completed", Payload: &maatv1.Event_ToolCallCompleted{ToolCallCompleted: &maatv1.ToolCallCompleted{ToolCallId: "tc_2", IsError: true}}}),
+		ev(6, &maatv1.Event{Type: "tool_call.cancelled", Payload: &maatv1.Event_ToolCallCancelled{ToolCallCancelled: &maatv1.ToolCallCancelled{ToolCallId: "tc_1", Reason: "interrupted"}}}),
+		ev(7, &maatv1.Event{Type: "tool_calls.resolved", Payload: &maatv1.Event_ToolCallsResolved{ToolCallsResolved: &maatv1.ToolCallsResolved{StepId: "stp_1"}}}),
+		ev(8, &maatv1.Event{Type: "agent.tool_call", Payload: &maatv1.Event_AgentToolCall{AgentToolCall: &maatv1.AgentToolCall{ToolCall: &maatv1.ToolCall{
+			Id: "tc_3", Name: "big", ArgsRef: "sha256:args"}}}}),
+	}
+	base := ToolCallEvent{ThreadID: "thr_1", RunID: r, StepID: "stp_1", ToolCallID: "tc_1", Name: "read_file"}
+	with := func(f func(*ToolCallEvent)) Event {
+		e := base
+		f(&e)
+		return e
+	}
+	want := []Event{
+		with(func(e *ToolCallEvent) { e.Status, e.Args = ToolCallPending, map[string]any{"path": "a"} }),
+		with(func(e *ToolCallEvent) { e.Status, e.ExecutorID = ToolCallClaimed, "exe_1" }),
+		with(func(e *ToolCallEvent) { e.Status, e.DispatchAttempt = ToolCallPending, 1 }),
+		with(func(e *ToolCallEvent) { e.Status, e.Reason, e.Message = ToolCallFailed, "executor_lost", "gone" }),
+		with(func(e *ToolCallEvent) {
+			e.ToolCallID, e.Name, e.Status, e.IsError = "tc_2", "", ToolCallCompleted, true
+		}),
+		with(func(e *ToolCallEvent) { e.Status, e.Reason = ToolCallCancelled, "interrupted" }),
+		with(func(e *ToolCallEvent) {
+			e.ToolCallID, e.Name, e.Status, e.ArgsRef = "tc_3", "big", ToolCallPending, "sha256:args"
+		}),
+	}
+	rec := NewReconciler()
+	var got []Event
+	for _, e := range in {
+		got = append(got, rec.Apply(e)...)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events:\n got  %#v\n want %#v", got, want)
+	}
+}
+
 func TestEnumOf(t *testing.T) {
 	if got := enumOf[SessionStatus](maatv1.SessionStatus_SESSION_STATUS_UNSPECIFIED, "SESSION_STATUS_"); got != "" {
 		t.Fatalf("unspecified = %q", got)

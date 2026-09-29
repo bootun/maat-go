@@ -68,6 +68,7 @@ func usageOf(u *maatv1.Usage) Usage {
 
 // Event 是 Stream 产出的事件，具体类型为：
 //   - TextEvent、StepRewoundEvent：按 spec §11.5 对账后的文本视图；
+//   - ToolCallEvent：工具调用的状态变化；
 //   - StatusEvent、RunCompletedEvent、RunFailedEvent：状态变化；
 //   - RawEvent：原始事件（需要 WithRawEvents）。
 type Event interface{ isEvent() }
@@ -94,6 +95,43 @@ type StepRewoundEvent struct {
 	StepID   string
 	// Attempt 是新的 attempt；因 stream.reset 作废时为 0。
 	Attempt uint32
+}
+
+// ToolCallStatus 是工具调用的状态。
+type ToolCallStatus string
+
+// 工具调用的状态。
+const (
+	ToolCallPending   ToolCallStatus = "pending"
+	ToolCallClaimed   ToolCallStatus = "claimed"
+	ToolCallRunning   ToolCallStatus = "running"
+	ToolCallCompleted ToolCallStatus = "completed"
+	ToolCallFailed    ToolCallStatus = "failed"
+	ToolCallCancelled ToolCallStatus = "cancelled"
+)
+
+// ToolCallEvent 表示工具调用的状态变化：模型发起调用（pending）、被认领（claimed）、回传结果（completed）、
+// 失败（failed，例如 executor_lost、timeout、unknown_tool）、被取消（cancelled，例如中断），
+// 以及执行器掉线后重新开放（pending，DispatchAttempt 增加）。
+type ToolCallEvent struct {
+	ThreadID   string
+	RunID      string
+	StepID     string
+	ToolCallID string
+	// Name 是工具名；订阅从调用发起之后开始时可能为空。
+	Name   string
+	Status ToolCallStatus
+	// Args 是模型给出的参数（pending 且参数不超过 64KB 时有值）；较大的参数只有 ArgsRef。
+	Args    map[string]any
+	ArgsRef string
+	// ExecutorID 是认领者（claimed 时有值）。
+	ExecutorID      string
+	DispatchAttempt uint32
+	// IsError 表示回传的是错误结果（completed 时有值）。
+	IsError bool
+	// Reason 与 Message 是失败或取消的原因（failed、cancelled 时有值）。
+	Reason  string
+	Message string
 }
 
 // StatusEvent 表示会话或线程的状态变化。
@@ -142,6 +180,7 @@ type RawEvent struct {
 
 func (TextEvent) isEvent()         {}
 func (StepRewoundEvent) isEvent()  {}
+func (ToolCallEvent) isEvent()     {}
 func (StatusEvent) isEvent()       {}
 func (RunCompletedEvent) isEvent() {}
 func (RunFailedEvent) isEvent()    {}

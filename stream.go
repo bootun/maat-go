@@ -17,10 +17,13 @@ const resumeTokenTrailer = "Maat-Resume-Token"
 type StreamOption func(*streamOptions)
 
 type streamOptions struct {
-	raw         bool
-	noDeltas    bool
-	afterSeq    uint64
-	resumeToken string
+	raw           bool
+	noDeltas      bool
+	noAutoExecute bool
+	afterSeq      uint64
+	resumeToken   string
+	// executor 是 Run.Stream 内部创建的执行器。
+	executor *executor
 }
 
 func newStreamOptions(opts []StreamOption) streamOptions {
@@ -36,6 +39,10 @@ func WithRawEvents() StreamOption { return func(o *streamOptions) { o.raw = true
 
 // WithoutDeltas 不接收瞬时事件（delta、marker），只处理已提交事件：TextEvent 只在 step 提交时产出一次。
 func WithoutDeltas() StreamOption { return func(o *streamOptions) { o.noDeltas = true } }
+
+// WithAutoExecute 设置 Run.Stream（以及 Run.Wait）是否自动执行工具调用，默认开启。
+// 关闭后工具调用需要由其他执行器（例如 Client.Executor）处理。Session.Stream 从不执行工具调用。
+func WithAutoExecute(on bool) StreamOption { return func(o *streamOptions) { o.noAutoExecute = !on } }
 
 // AfterSeq 让 Session.Stream 从 seq > n 的已提交事件开始（默认 0，即先补齐全部历史）。
 // 通常与 Session.History 配合：先读历史，再用最后一条的 seq 订阅实时流。Run.Stream 忽略该选项。

@@ -1,6 +1,7 @@
 package maat
 
 import (
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"time"
@@ -24,6 +25,23 @@ type config struct {
 	retry       backoff
 	// reconnect 是事件流断线后的重连退避（spec §14.4：0.5s → 10s）。
 	reconnect backoff
+	logger    *slog.Logger
+	// toolConcurrency 是每个执行器（每次 Run.Stream 或 Attach）同时执行的工具调用数上限。
+	toolConcurrency int
+	// toolLease 是认领时申请的租约时长，每 toolLease/3 续约一次。
+	toolLease time.Duration
+}
+
+// 租约时长的范围（秒），与平台一致。
+const (
+	minLeaseSeconds = 10
+	maxLeaseSeconds = 600
+)
+
+// leaseSeconds 返回请求中的租约秒数（向上取整并限制在平台允许的范围内）。
+func (c config) leaseSeconds() uint32 {
+	s := int64((c.toolLease + time.Second - 1) / time.Second)
+	return uint32(min(max(s, minLeaseSeconds), maxLeaseSeconds))
 }
 
 func defaultConfig() config {
@@ -33,6 +51,10 @@ func defaultConfig() config {
 		maxAttempts: 3,
 		retry:       backoff{min: 200 * time.Millisecond, max: 2 * time.Second, jitter: true},
 		reconnect:   backoff{min: 500 * time.Millisecond, max: 10 * time.Second, jitter: true},
+		logger:      slog.Default(),
+		// spec §14.4：工具执行的并发默认 8。
+		toolConcurrency: 8,
+		toolLease:       60 * time.Second,
 	}
 }
 
@@ -48,6 +70,26 @@ func WithHTTPClient(hc *http.Client) Option {
 	return func(c *config) {
 		if hc != nil {
 			c.httpClient = hc
+		}
+	}
+}
+
+// WithLogger 设置 SDK 的日志（默认 slog.Default()）。SDK 只记录工具执行中无法自行恢复的问题
+// （例如结果回传失败，Warn 级别）与排查用的细节（Debug 级别），不记录工具参数与结果的内容。
+func WithLogger(l *slog.Logger) Option {
+	return func(c *config) {
+		if l != nil {
+			c.logger = l
+		}
+	}
+}
+
+// WithToolConcurrency 设置每个执行器（每次 Run.Stream 或 Executor.Attach）同时执行的工具调用数上限，默认 8。
+// 超出的调用等待空位后再认领，期间可以被其他执行器认领。
+func WithToolConcurrency(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.toolConcurrency = n
 		}
 	}
 }

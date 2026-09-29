@@ -15,13 +15,15 @@ import (
 //   - agent.message(step)：标记为已提交，产出 Final 的 TextEvent（权威内容）；
 //   - stream.reset：丢弃所有未提交的 buffer，对非空的 step 产出 StepRewoundEvent。
 //
-// 同时把状态类事件转换为 StatusEvent、RunCompletedEvent、RunFailedEvent。
+// 同时把工具调用事件转换为 ToolCallEvent，把状态类事件转换为 StatusEvent、RunCompletedEvent、RunFailedEvent。
 // Run.Stream 与 Session.Stream 内部使用它；自行处理原始事件（例如 History 与实时流拼接）时也可以直接使用。
 // Reconciler 不是并发安全的。
 type Reconciler struct {
 	steps map[string]*stepState
 	// order 是 step 首次出现的顺序，使 stream.reset 产出的事件顺序确定。
 	order []string
+	// tools 是工具调用 ID 到工具名的映射（后续的工具调用事件不带工具名）。
+	tools map[string]string
 }
 
 type stepState struct {
@@ -33,7 +35,9 @@ type stepState struct {
 }
 
 // NewReconciler 构造 Reconciler。
-func NewReconciler() *Reconciler { return &Reconciler{steps: map[string]*stepState{}} }
+func NewReconciler() *Reconciler {
+	return &Reconciler{steps: map[string]*stepState{}, tools: map[string]string{}}
+}
 
 func (r *Reconciler) step(e *maatv1.Event) *stepState {
 	id := e.GetStepId()
@@ -95,6 +99,37 @@ func (r *Reconciler) Apply(e *maatv1.Event) []Event {
 			out = append(out, StepRewoundEvent{ThreadID: st.threadID, RunID: st.runID, StepID: id})
 		}
 		return out
+	case *maatv1.Event_AgentToolCall:
+		tc := p.AgentToolCall.GetToolCall()
+		r.tools[tc.GetId()] = tc.GetName()
+		var args map[string]any
+		if a := tc.GetArgs(); a != nil {
+			args = a.AsMap()
+		}
+		return []Event{ToolCallEvent{
+			ThreadID: e.GetThreadId(), RunID: e.GetRunId(), StepID: e.GetStepId(), ToolCallID: tc.GetId(), Name: tc.GetName(),
+			Status: ToolCallPending, Args: args, ArgsRef: tc.GetArgsRef(), DispatchAttempt: tc.GetDispatchAttempt(),
+		}}
+	case *maatv1.Event_ToolCallClaimed:
+		ev := r.toolEvent(e, p.ToolCallClaimed.GetToolCallId(), ToolCallClaimed)
+		ev.ExecutorID, ev.DispatchAttempt = p.ToolCallClaimed.GetExecutorId(), p.ToolCallClaimed.GetDispatchAttempt()
+		return []Event{ev}
+	case *maatv1.Event_ToolCallCompleted:
+		ev := r.toolEvent(e, p.ToolCallCompleted.GetToolCallId(), ToolCallCompleted)
+		ev.IsError = p.ToolCallCompleted.GetIsError()
+		return []Event{ev}
+	case *maatv1.Event_ToolCallFailed:
+		ev := r.toolEvent(e, p.ToolCallFailed.GetToolCallId(), ToolCallFailed)
+		ev.Reason, ev.Message = p.ToolCallFailed.GetReason(), p.ToolCallFailed.GetMessage()
+		return []Event{ev}
+	case *maatv1.Event_ToolCallCancelled:
+		ev := r.toolEvent(e, p.ToolCallCancelled.GetToolCallId(), ToolCallCancelled)
+		ev.Reason = p.ToolCallCancelled.GetReason()
+		return []Event{ev}
+	case *maatv1.Event_ToolCallReopened:
+		ev := r.toolEvent(e, p.ToolCallReopened.GetToolCallId(), ToolCallPending)
+		ev.DispatchAttempt = p.ToolCallReopened.GetDispatchAttempt()
+		return []Event{ev}
 	case *maatv1.Event_SessionStatusChanged:
 		return []Event{StatusEvent{
 			Session:          enumOf[SessionStatus](p.SessionStatusChanged.GetStatus(), "SESSION_STATUS_"),
@@ -120,6 +155,13 @@ func (r *Reconciler) Apply(e *maatv1.Event) []Event {
 		}}
 	}
 	return nil
+}
+
+// toolEvent 构造工具调用事件的公共字段。
+func (r *Reconciler) toolEvent(e *maatv1.Event, id string, status ToolCallStatus) ToolCallEvent {
+	return ToolCallEvent{
+		ThreadID: e.GetThreadId(), RunID: e.GetRunId(), StepID: e.GetStepId(), ToolCallID: id, Name: r.tools[id], Status: status,
+	}
 }
 
 // advance 把 step 的游标推进到事件的 attempt：buffer 非空时产出 StepRewoundEvent。

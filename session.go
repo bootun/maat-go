@@ -29,21 +29,27 @@ type CreateSessionParams struct {
 	// IdempotencyKey 是幂等键：同一项目内重复使用时返回同一会话。为空时 SDK 生成一个，
 	// 保证内部重试不会重复创建。
 	IdempotencyKey string
-	// TODO(M2-10)：Tools []Tool。
+	// Tools 是会话可用的调用方工具：声明随会话创建提交给平台，实现由本进程执行
+	// （Run.Stream 默认自动执行，见 Session.Tools）。
+	Tools []Tool
 }
 
 // Create 创建会话（不带首条消息，会话处于空闲状态），之后用 Session.Send 发送消息。
 func (s *Sessions) Create(ctx context.Context, p CreateSessionParams) (*Session, error) {
+	defs, err := toolDefinitions(p.Tools)
+	if err != nil {
+		return nil, err
+	}
 	key := p.IdempotencyKey
 	if key == "" {
 		key = newIdempotencyKey()
 	}
 	req := &maatv1.CreateSessionRequest{
 		AgentId: p.Agent, AgentVersion: p.AgentVersion, Model: p.Model, Title: p.Title, Metadata: p.Metadata,
-		IdempotencyKey: key,
+		IdempotencyKey: key, Tools: defs,
 	}
 	var res *maatv1.CreateSessionResponse
-	err := s.c.call(ctx, true, func(ctx context.Context) error {
+	err = s.c.call(ctx, true, func(ctx context.Context) error {
 		r, err := s.c.sessions.CreateSession(ctx, connect.NewRequest(req))
 		if err != nil {
 			return err
@@ -54,7 +60,9 @@ func (s *Sessions) Create(ctx context.Context, p CreateSessionParams) (*Session,
 	if err != nil {
 		return nil, err
 	}
-	return s.c.sessionOf(res.GetSession()), nil
+	sess := s.c.sessionOf(res.GetSession())
+	sess.Tools = append([]Tool(nil), p.Tools...)
+	return sess, nil
 }
 
 // Get 读取会话的最新状态。
@@ -147,6 +155,10 @@ type Session struct {
 	Archived         bool
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	// Tools 是本进程为该会话执行的工具实现：Send 返回的 Run 在 Stream / Wait 时自动执行其中的工具调用。
+	// Sessions.Create 时设为 CreateSessionParams.Tools；通过 Sessions.Get、List 取得的会话需要自行设置
+	// （声明已在创建会话时提交给平台）。
+	Tools []Tool
 
 	c *Client
 }
@@ -199,6 +211,9 @@ type sendOptions struct {
 	clientMessageID string
 	threadID        string
 	model           string
+	tools           []Tool
+	toolsSet        bool
+	interrupt       bool
 }
 
 // WithClientMessageID 设置消息的幂等键：重复发送同一 ID 只会投递一次。为空时 SDK 生成一个，
@@ -212,6 +227,15 @@ func WithThread(threadID string) SendOption { return func(o *sendOptions) { o.th
 
 // WithModel 从这条消息起把会话的模型别名切换为 alias（之后的消息沿用）。
 func WithModel(alias string) SendOption { return func(o *sendOptions) { o.model = alias } }
+
+// WithTools 把本条消息开启的 Run 的工具集替换为 tools（只作用于这个 Run）：声明随消息提交给平台，
+// 返回的 Run 自动执行的也是这些工具。消息插入到运行中的 Run 时，平台沿用该 Run 原有的工具集。
+func WithTools(tools ...Tool) SendOption {
+	return func(o *sendOptions) { o.tools, o.toolsSet = tools, true }
+}
+
+// WithInterrupt 先中断线程当前的 Run（结束原因为 interrupted），再以新 Run 处理这条消息。
+func WithInterrupt() SendOption { return func(o *sendOptions) { o.interrupt = true } }
 
 // Send 发送一条文本消息，返回处理它的 Run。线程空闲时开启新 Run；线程运行中调用即为插入消息，
 // 返回的是正在运行的 Run（Run.Delivery 为 DeliveryInserted）。
@@ -232,8 +256,17 @@ func (s *Session) SendInput(ctx context.Context, in MessageInput, opts ...SendOp
 	if err != nil {
 		return nil, err
 	}
+	tools := s.Tools
+	var defs []*maatv1.ToolDefinition
+	if o.toolsSet {
+		tools = o.tools
+		if defs, err = toolDefinitions(o.tools); err != nil {
+			return nil, err
+		}
+	}
 	req := &maatv1.SendMessageRequest{
 		SessionId: s.ID, ThreadId: o.threadID, Message: msg, ClientMessageId: o.clientMessageID, Model: o.model,
+		Tools: defs, Interrupt: o.interrupt,
 	}
 	var res *maatv1.SendMessageResponse
 	err = s.c.call(ctx, true, func(ctx context.Context) error {
@@ -254,7 +287,32 @@ func (s *Session) SendInput(ctx context.Context, in MessageInput, opts ...SendOp
 	return &Run{
 		ID: res.GetRunId(), SessionID: s.ID, ThreadID: thread, MessageID: res.GetMessageId(),
 		Delivery: enumOf[Delivery](res.GetDelivery(), "DELIVERY_"), c: s.c, afterSeq: s.LastSeq,
+		tools: append([]Tool(nil), tools...),
 	}, nil
+}
+
+// InterruptOption 配置 Interrupt。
+type InterruptOption func(*maatv1.InterruptSessionRequest)
+
+// InterruptThread 中断指定线程（默认中断主线程）。
+func InterruptThread(threadID string) InterruptOption {
+	return func(r *maatv1.InterruptSessionRequest) { r.ThreadId = threadID }
+}
+
+// Interrupt 中断线程当前的 Run：正在输出的文本作为部分消息保留，等待中的工具调用被取消
+// （执行中的工具函数的 ctx 随之取消），Run 以 StopInterrupted 结束。线程空闲时什么也不做。
+// 中断后立即发送新消息请使用 Send(..., WithInterrupt())。
+//
+// 中断不是幂等的，出错时不会自动重试。
+func (s *Session) Interrupt(ctx context.Context, opts ...InterruptOption) error {
+	req := &maatv1.InterruptSessionRequest{SessionId: s.ID}
+	for _, f := range opts {
+		f(req)
+	}
+	return s.c.call(ctx, false, func(ctx context.Context) error {
+		_, err := s.c.sessions.InterruptSession(ctx, connect.NewRequest(req))
+		return err
+	})
 }
 
 // historyPageSize 是 History 每次请求的条数（平台上限 500）。
@@ -295,6 +353,7 @@ func (s *Session) History(ctx context.Context, afterSeq uint64) iter.Seq2[RawEve
 
 // Stream 订阅会话的全部事件：先补齐 AfterSeq（默认 0）之后的历史，再接实时流，断线后自动续传。
 // 它产出对账后的高层事件（见 Event），直到 ctx 结束（产出 ctx 的错误）或出现不可重试的错误。
+// Session.Stream 不执行工具调用：请使用 Run.Stream，或用 Client.Executor 接入会话。
 func (s *Session) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Event, error] {
 	o := newStreamOptions(opts)
 	return func(yield func(Event, error) bool) {
