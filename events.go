@@ -38,6 +38,17 @@ const (
 	StopCancelled StopReason = "cancelled"
 )
 
+// ThreadMode 是子线程的运行方式（spec §7.2）。
+type ThreadMode string
+
+// 子线程的运行方式；主线程为空。
+const (
+	// ThreadForeground：父线程等待子线程结束，结果作为 spawn_agent 调用的结果返回。
+	ThreadForeground ThreadMode = "foreground"
+	// ThreadBackground：spawn_agent 调用立即返回，子线程结束后结果以消息投递给父线程。
+	ThreadBackground ThreadMode = "background"
+)
+
 // Delivery 是消息被接收时的投递方式。
 type Delivery string
 
@@ -70,7 +81,10 @@ func usageOf(u *maatv1.Usage) Usage {
 //   - TextEvent、StepRewoundEvent：按 spec §11.5 对账后的文本视图；
 //   - ToolCallEvent：工具调用的状态变化；
 //   - StatusEvent、RunCompletedEvent、RunFailedEvent：状态变化；
+//   - ThreadCreatedEvent：SubAgent 的子线程被创建；
 //   - RawEvent：原始事件（需要 WithRawEvents）。
+//
+// 每个事件都带 ThreadID（会话状态变化除外）：主线程与子线程的事件由它区分。
 type Event interface{ isEvent() }
 
 // TextEvent 表示某个 step 的 assistant 文本有更新。
@@ -170,6 +184,21 @@ type RunError struct {
 	Message string
 }
 
+// ThreadCreatedEvent 表示父线程的 spawn_agent 调用创建了子线程（spec §7.3）。
+type ThreadCreatedEvent struct {
+	ThreadID       string
+	ParentThreadID string
+	// ParentToolCallID 是创建它的 spawn_agent 调用。
+	ParentToolCallID string
+	// AgentName 是 SubAgent 的名字。
+	AgentName string
+	Mode      ThreadMode
+	// Depth 是线程深度：主线程为 0，子线程为 1，孙线程为 2。
+	Depth uint32
+	// Path 是从主线程到本线程的线程 ID 列表。
+	Path []string
+}
+
 // RawEvent 是平台推送的原始事件，字段与方法来自 maatv1.Event（例如 GetType、GetSeq、GetAgentMessage）。
 // 已提交事件的 Seq 在会话内严格递增；瞬时事件（delta、marker、心跳等）的 Seq 为 0。
 type RawEvent struct {
@@ -178,13 +207,14 @@ type RawEvent struct {
 	ResumeToken string
 }
 
-func (TextEvent) isEvent()         {}
-func (StepRewoundEvent) isEvent()  {}
-func (ToolCallEvent) isEvent()     {}
-func (StatusEvent) isEvent()       {}
-func (RunCompletedEvent) isEvent() {}
-func (RunFailedEvent) isEvent()    {}
-func (RawEvent) isEvent()          {}
+func (TextEvent) isEvent()          {}
+func (StepRewoundEvent) isEvent()   {}
+func (ToolCallEvent) isEvent()      {}
+func (StatusEvent) isEvent()        {}
+func (RunCompletedEvent) isEvent()  {}
+func (RunFailedEvent) isEvent()     {}
+func (ThreadCreatedEvent) isEvent() {}
+func (RawEvent) isEvent()           {}
 
 // isStreamControl 判断事件是否为流控制事件（心跳、reset、lagged），它们不属于任何 Run。
 func isStreamControl(e *maatv1.Event) bool {

@@ -15,7 +15,8 @@ import (
 //   - agent.message(step)：标记为已提交，产出 Final 的 TextEvent（权威内容）；
 //   - stream.reset：丢弃所有未提交的 buffer，对非空的 step 产出 StepRewoundEvent。
 //
-// 同时把工具调用事件转换为 ToolCallEvent，把状态类事件转换为 StatusEvent、RunCompletedEvent、RunFailedEvent。
+// 同时把工具调用事件转换为 ToolCallEvent，把状态类事件转换为 StatusEvent、RunCompletedEvent、RunFailedEvent，
+// 把 thread.created 转换为 ThreadCreatedEvent。
 // Run.Stream 与 Session.Stream 内部使用它；自行处理原始事件（例如 History 与实时流拼接）时也可以直接使用。
 // Reconciler 不是并发安全的。
 type Reconciler struct {
@@ -140,6 +141,12 @@ func (r *Reconciler) Apply(e *maatv1.Event) []Event {
 			ThreadID: e.GetThreadId(), RunID: e.GetRunId(),
 			Thread:     enumOf[ThreadStatus](p.ThreadStatusChanged.GetStatus(), "THREAD_STATUS_"),
 			StopReason: enumOf[StopReason](p.ThreadStatusChanged.GetStopReason(), "STOP_REASON_"),
+		}}
+	case *maatv1.Event_ThreadCreated:
+		c := p.ThreadCreated
+		return []Event{ThreadCreatedEvent{
+			ThreadID: e.GetThreadId(), ParentThreadID: c.GetParentThreadId(), ParentToolCallID: c.GetParentToolCallId(),
+			AgentName: c.GetAgentName(), Mode: enumOf[ThreadMode](c.GetMode(), "THREAD_MODE_"), Depth: c.GetDepth(), Path: c.GetPath(),
 		}}
 	case *maatv1.Event_RunCompleted:
 		return []Event{RunCompletedEvent{

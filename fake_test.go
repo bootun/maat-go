@@ -39,6 +39,7 @@ type fakeBackend struct {
 	ckpts      func(req *maatv1.ListCheckpointsRequest) (*maatv1.ListCheckpointsResponse, error)
 	annotate   func(req *maatv1.AnnotateCheckpointRequest) (*maatv1.AnnotateCheckpointResponse, error)
 	getBlob    func(req *maatv1.GetBlobRequest) (*maatv1.GetBlobResponse, error)
+	threads    func(req *maatv1.ListThreadsRequest) (*maatv1.ListThreadsResponse, error)
 	// conns[i] 是第 i 个事件流连接的行为；超出时连接一直保持到客户端断开。
 	conns []func(ctx context.Context, st *connect.ServerStream[maatv1.StreamSessionEventsResponse]) error
 
@@ -105,6 +106,10 @@ func (f *fakeBackend) AnnotateCheckpoint(_ context.Context, req *connect.Request
 
 func (f *fakeBackend) GetBlob(_ context.Context, req *connect.Request[maatv1.GetBlobRequest]) (*connect.Response[maatv1.GetBlobResponse], error) {
 	return respond(f.getBlob(req.Msg))
+}
+
+func (f *fakeBackend) ListThreads(_ context.Context, req *connect.Request[maatv1.ListThreadsRequest]) (*connect.Response[maatv1.ListThreadsResponse], error) {
+	return respond(f.threads(req.Msg))
 }
 
 func (f *fakeBackend) StreamSessionEvents(ctx context.Context, req *connect.Request[maatv1.StreamSessionEventsRequest],

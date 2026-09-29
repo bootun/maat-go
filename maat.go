@@ -39,7 +39,7 @@ import (
 )
 
 // Version 是 SDK 的版本，写在 User-Agent 中。
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // Client 是 maat 平台的客户端，可以并发使用。
 type Client struct {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"iter"
 	"sync"
+
+	maatv1 "github.com/bootun/maat-go/gen/maat/v1"
 )
 
 // Run 是线程从一次触发到重新空闲的一段工作，由 Session.Send 返回。
@@ -40,16 +42,20 @@ type Result struct {
 	Error         *RunError
 }
 
-// Stream 订阅这个 Run 的事件，产出对账后的高层事件（见 Event），直到 RunCompletedEvent 或 RunFailedEvent
-// （包含该事件）后结束；断线后自动续传。只产出属于该 Run 的事件：其他 Run 与会话级的事件被跳过，
-// 流控制事件只在 WithRawEvents 时以 RawEvent 产出。
+// Stream 订阅这个 Run 的事件，产出对账后的高层事件（见 Event），直到该 Run 的 RunCompletedEvent 或
+// RunFailedEvent（包含该事件）后结束；断线后自动续传。只产出属于该 Run 的事件：其他 Run 与会话级的事件被跳过，
+// 流控制事件只在 WithRawEvents 时以 RawEvent 产出。WithSubthreads 时还产出该 Run 经 spawn_agent 创建的
+// 子线程（及其后代）的事件。
 //
 // 对于插入到运行中 Run 的消息（DeliveryInserted），Stream 从发送前的会话位置开始，
 // 此前已产生的事件不会重放。
 //
-// 迭代期间，Stream 自动执行该 Run 中注册了实现的工具调用（Session.Tools 或 WithTools）：认领、执行、
+// 迭代期间，Stream 自动执行该 Run 及其子线程中注册了实现的工具调用（Session.Tools 或 WithTools）：认领、执行、
 // 续约、回传（WithAutoExecute(false) 关闭）。工具在后台执行，不必等待迭代；迭代结束时（Run 结束或提前退出）
-// 取消仍在执行的工具并等待它们返回。
+// 取消仍在执行的工具并等待它们返回。Run 结束后仍在运行的后台子线程的工具调用需要由其他执行器
+// （例如 Client.Executor）处理。
+//
+// 子线程按 thread.created 事件识别，因此用 WithResumeToken 从 Run 中途续订时，续传位置之前创建的子线程不会被跟踪。
 func (r *Run) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Event, error] {
 	o := newStreamOptions(opts)
 	return func(yield func(Event, error) bool) {
@@ -68,24 +74,30 @@ func (r *Run) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Event,
 		}
 		rec := NewReconciler()
 		acc := Result{RunID: r.ID}
+		scope := newRunScope(r.ID)
 		for raw, err := range r.c.subscribe(ctx, subscription{
 			sessionID: r.SessionID, afterSeq: r.afterSeq, token: o.resumeToken, includeDeltas: !o.noDeltas,
+			subthreadDeltas: o.subthreads && !o.noDeltas,
 		}) {
 			if err != nil {
 				yield(nil, err)
 				return
 			}
-			if raw.GetRunId() != r.ID && !isStreamControl(raw.Event) {
+			own, sub := scope.observe(raw.Event)
+			if !own && !sub && !isStreamControl(raw.Event) {
 				continue
 			}
 			if o.executor != nil {
 				o.executor.handle(raw.Event)
 			}
+			if sub && !o.subthreads {
+				continue
+			}
 			if o.raw && !yield(raw, nil) {
 				return
 			}
 			for _, ev := range rec.Apply(raw.Event) {
-				done := acc.observe(ev)
+				done := own && acc.observe(ev)
 				if done {
 					r.setResult(acc)
 				}
@@ -95,6 +107,36 @@ func (r *Run) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Event,
 			}
 		}
 	}
+}
+
+// spawnAgentTool 是平台注入的 spawn_agent 工具（spec §7.2）。
+const spawnAgentTool = "spawn_agent"
+
+// runScope 识别属于一个 Run 的事件：Run 自己的事件，以及它（递归地）经 spawn_agent 创建的子线程的事件。
+type runScope struct {
+	runID string
+	// spawns 是范围内发起的 spawn_agent 调用。
+	spawns map[string]bool
+	// threads 是由这些调用创建的子线程。
+	threads map[string]bool
+}
+
+func newRunScope(runID string) *runScope {
+	return &runScope{runID: runID, spawns: map[string]bool{}, threads: map[string]bool{}}
+}
+
+// observe 更新范围并返回事件是否属于 Run 自身（own）或它的子线程（sub）。
+func (s *runScope) observe(e *maatv1.Event) (own, sub bool) {
+	if c := e.GetThreadCreated(); c != nil && s.spawns[c.GetParentToolCallId()] {
+		s.threads[e.GetThreadId()] = true
+	}
+	own = e.GetRunId() == s.runID
+	sub = !own && e.GetThreadId() != "" && s.threads[e.GetThreadId()]
+	if tc := e.GetAgentToolCall().GetToolCall(); (own || sub) && tc.GetKind() == maatv1.ToolCallKind_TOOL_CALL_KIND_PLATFORM &&
+		tc.GetName() == spawnAgentTool {
+		s.spawns[tc.GetId()] = true
+	}
+	return own, sub
 }
 
 // observe 用高层事件更新结果，返回 Run 是否已结束。

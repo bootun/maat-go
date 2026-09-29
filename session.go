@@ -411,7 +411,7 @@ func (s *Session) Stream(ctx context.Context, opts ...StreamOption) iter.Seq2[Ev
 	return func(yield func(Event, error) bool) {
 		rec := NewReconciler()
 		for raw, err := range s.c.subscribe(ctx, subscription{
-			sessionID: s.ID, afterSeq: o.afterSeq, token: o.resumeToken, includeDeltas: !o.noDeltas,
+			sessionID: s.ID, afterSeq: o.afterSeq, token: o.resumeToken, includeDeltas: !o.noDeltas, subthreadDeltas: o.subthreads,
 		}) {
 			if err != nil {
 				yield(nil, err)

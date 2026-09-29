@@ -136,6 +136,29 @@ blob, err := s.GetBlob(ctx, ref)
 - `IncludeAncestors` 不能与 `afterSeq > 0` 同时使用（`ErrAncestorsWithAfterSeq`）。
 - 空闲的会话会被平台归档到对象存储，`History` 与 `Stream` 的结果不受影响。
 
+## SubAgent
+
+Agent 定义了 SubAgent 时，模型可以调用平台注入的 `spawn_agent` 工具创建子线程。子线程发起的工具调用与主线程
+走同一套协议：`Run.Stream` / `Run.Wait` 会自动执行该 Run 创建的子线程（及孙线程）的工具调用。
+
+```go
+run, err := s.Send(ctx, "调研一下 X")
+for ev, err := range run.Stream(ctx, maat.WithSubthreads()) { // 同时产出子线程的事件与实时文本
+    switch e := ev.(type) {
+    case maat.ThreadCreatedEvent: // e.AgentName、e.Mode（foreground / background）、e.Depth
+    case maat.TextEvent:          // e.ThreadID 区分主线程与子线程
+    }
+}
+
+threads, err := s.Threads(ctx)                                    // 主线程与全部子线程
+follow, err := s.Send(ctx, "再补充一下 Y", maat.WithThread(threads[1].ID)) // 直接追问空闲的子线程
+```
+
+- 前台子线程结束时，结果作为 `spawn_agent` 调用的结果交给父线程；后台子线程的 `spawn_agent` 立即返回，
+  结束后结果以消息投递给父线程（父线程空闲时开启新 Run）。直接追问子线程产生的 Run 不向父线程投递。
+- 中断父线程时前台子线程一并中断；后台子线程默认不受影响，可以用 `Interrupt(ctx, InterruptThread(id))` 单独中断。
+- Run 结束后仍在运行的后台子线程的工具调用，需要由 `Client.Executor(...).Attach` 等其他执行器处理。
+
 ## 概念
 
 | API | 说明 |
@@ -145,12 +168,13 @@ blob, err := s.GetBlob(ctx, ref)
 | `Sessions.Create / Get / List` | 创建、读取、列出会话（`List` 自动翻页） |
 | `Session.Send / SendInput` | 发送消息，返回处理它的 `Run`。线程运行中调用即为**插入消息**，返回正在运行的 Run（`Delivery == DeliveryInserted`） |
 | `Session.Interrupt(ctx, opts...)` | 中断线程当前的 Run（`InterruptThread` 指定线程）；中断后立即发新消息用 `Send(..., WithInterrupt())` |
+| `Session.Threads(ctx)` | 列出会话的全部线程（主线程与 SubAgent 的子线程）；`Send(..., WithThread(id))` 发给指定线程 |
 | `Session.History(ctx, afterSeq, opts...)` | 按 seq 读取已提交事件（`ExpandRefs`、`IncludeAncestors`、`HistoryTypes`、`HistoryThreads`） |
 | `Sessions.Fork(ctx, params)` | 从稳定的 checkpoint 创建新会话，返回新会话、带消息时的 Run 与 `ExecutorStateRef` |
 | `Checkpoints.List / Annotate` | 列出 checkpoint（自动翻页）；事后设置 executor_state_ref |
 | `Session.GetBlob(ctx, ref)` | 读取会话（或它的 fork 祖先）引用的大内容 |
 | `Session.Stream(ctx, opts...)` | 先补齐历史（`AfterSeq`，默认 0），再接实时流 |
-| `Run.Stream(ctx, opts...)` | 只产出该 Run 的事件，直到 `RunCompletedEvent` / `RunFailedEvent`；默认自动执行工具 |
+| `Run.Stream(ctx, opts...)` | 只产出该 Run 的事件（`WithSubthreads` 时包括它创建的子线程），直到该 Run 的 `RunCompletedEvent` / `RunFailedEvent`；默认自动执行工具（包括子线程的） |
 | `Run.Wait(ctx, opts...)` | 等待 Run 结束。Run 失败不算调用错误：`err == nil`，`Result.Error` 有值 |
 | `NewTool`、`SchemaFor` | 声明由本进程执行的工具（见[工具](#工具)） |
 | `Client.Executor(tools...).Attach(ctx, sessionID)` | Executor 模式：只执行工具调用；`OnFork` 在接入 fork 出的会话时先回调 |
@@ -164,6 +188,9 @@ blob, err := s.GetBlob(ctx, ref)
 - `ToolCallEvent`：工具调用的状态变化（pending、claimed、completed、failed、cancelled；重新开放时回到 pending）。
 - `StatusEvent`：会话或线程状态变化。
 - `RunCompletedEvent`、`RunFailedEvent`：Run 结束。
+- `ThreadCreatedEvent`：SubAgent 的子线程被创建。
+
+每个事件都带 `ThreadID`（会话状态变化除外），主线程与子线程的事件由它区分。
 
 `WithRawEvents()` 会在高层事件之前把每条原始事件以 `RawEvent`（内嵌 `*maatv1.Event`）一并产出。
 自行拼接历史与实时流时，可以直接使用 `NewReconciler()`。

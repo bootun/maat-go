@@ -20,6 +20,7 @@ type streamOptions struct {
 	raw           bool
 	noDeltas      bool
 	noAutoExecute bool
+	subthreads    bool
 	afterSeq      uint64
 	resumeToken   string
 	// executor 是 Run.Stream 内部创建的执行器。
@@ -44,6 +45,11 @@ func WithoutDeltas() StreamOption { return func(o *streamOptions) { o.noDeltas =
 // 关闭后工具调用需要由其他执行器（例如 Client.Executor）处理。Session.Stream 从不执行工具调用。
 func WithAutoExecute(on bool) StreamOption { return func(o *streamOptions) { o.noAutoExecute = !on } }
 
+// WithSubthreads 让 Run.Stream 同时产出该 Run（递归地）经 spawn_agent 创建的子线程的事件，包括子线程的实时
+// 文本（spec §7.4），用各事件的 ThreadID 区分。不设置时只产出该 Run 自己的事件；子线程发起的工具调用
+// 无论是否设置都会自动执行。Session.Stream 总是包含全部线程的已提交事件，设置后也接收子线程的实时文本。
+func WithSubthreads() StreamOption { return func(o *streamOptions) { o.subthreads = true } }
+
 // AfterSeq 让 Session.Stream 从 seq > n 的已提交事件开始（默认 0，即先补齐全部历史）。
 // 通常与 Session.History 配合：先读历史，再用最后一条的 seq 订阅实时流。Run.Stream 忽略该选项。
 func AfterSeq(n uint64) StreamOption { return func(o *streamOptions) { o.afterSeq = n } }
@@ -60,6 +66,8 @@ type subscription struct {
 	afterSeq      uint64
 	token         string
 	includeDeltas bool
+	// subthreadDeltas 为真时也接收子线程的瞬时事件（默认只有主线程的）。
+	subthreadDeltas bool
 }
 
 // subscribe 订阅会话事件流，断线后自动续传（spec §11.4、§14.4）：
@@ -82,6 +90,7 @@ func (c *Client) subscribe(ctx context.Context, sub subscription) iter.Seq2[RawE
 			sctx, cancel := context.WithCancel(withRequestID(ctx, id))
 			stream, err := c.events.StreamSessionEvents(sctx, connect.NewRequest(&maatv1.StreamSessionEventsRequest{
 				SessionId: sub.sessionID, ResumeToken: token, AfterSeq: lastSeq, IncludeDeltas: &sub.includeDeltas,
+				IncludeSubthreadDeltas: sub.subthreadDeltas,
 			}))
 			closing, stopped, received := false, false, 0
 			if err == nil {

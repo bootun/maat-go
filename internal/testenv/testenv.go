@@ -88,9 +88,24 @@ func readEnvFile(path string, vars map[string]string) error {
 // Script 构造 fake LLM 的脚本（每个参数是一个 step 的 JSON，格式见后端 plan 附录 C）。
 func Script(steps ...string) string { return `{"steps":[` + strings.Join(steps, ",") + `]}` }
 
+// SubAgent 是 Agent 的 SubAgent 定义（spec §7.1）。脚本写在它自己的 system prompt 中（后端 plan 附录 C.2）。
+type SubAgent struct {
+	Name   string
+	Script string
+	// Tools 是会话工具集的子集；为空时取 ["*"]。
+	Tools           []string
+	AllowBackground bool
+}
+
 // NewAgent 创建一个测试独占的 Agent：凭据指向 fake LLM，模型别名的 upstream_model 为场景名；
 // script 非空时写在 system prompt 的 FAKE_SCRIPT: 之后。测试结束时归档 Agent。返回 Agent ID。
 func (e Env) NewAgent(t testing.TB, scenario, script string) string {
+	t.Helper()
+	return e.NewAgentWithSubagents(t, scenario, script)
+}
+
+// NewAgentWithSubagents 与 NewAgent 相同，但 Agent 带有 SubAgent（模型沿用父线程）。
+func (e Env) NewAgentWithSubagents(t testing.TB, scenario, script string, subs ...SubAgent) string {
 	t.Helper()
 	ctx := context.Background()
 	nonce := fmt.Sprintf("sdk-%s-%d", scenario, time.Now().UnixNano())
@@ -119,9 +134,23 @@ func (e Env) NewAgent(t testing.TB, scenario, script string) string {
 			ID string `json:"id"`
 		} `json:"agent"`
 	}
-	e.admin(ctx, t, "maat.v1.AgentService/CreateAgent", map[string]any{
-		"name": nonce, "initialVersion": map[string]any{"systemPrompt": prompt, "defaultModelAlias": nonce},
-	}, &agent)
+	spec := map[string]any{"systemPrompt": prompt, "defaultModelAlias": nonce}
+	if len(subs) > 0 {
+		defs := make([]map[string]any, 0, len(subs))
+		for _, sa := range subs {
+			tools := sa.Tools
+			if len(tools) == 0 {
+				tools = []string{"*"}
+			}
+			defs = append(defs, map[string]any{
+				"name": sa.Name, "description": "SDK integration subagent " + sa.Name, "model": "inherit", "tools": tools,
+				"allowBackground": sa.AllowBackground,
+				"systemPrompt":    "You are subagent " + sa.Name + " (" + nonce + ").\nFAKE_SCRIPT:" + sa.Script,
+			})
+		}
+		spec["subagents"] = defs
+	}
+	e.admin(ctx, t, "maat.v1.AgentService/CreateAgent", map[string]any{"name": nonce, "initialVersion": spec}, &agent)
 	t.Cleanup(func() {
 		e.admin(context.Background(), t, "maat.v1.AgentService/ArchiveAgent", map[string]any{"agentId": agent.Agent.ID}, nil)
 	})
