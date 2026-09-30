@@ -1,0 +1,14 @@
+{
+  "description": "正常：delta 累积为完整文本，提交后给出权威内容",
+  "events": [
+    {"type": "stream.marker", "runId": "run_1", "stepId": "s1", "attempt": 1, "streamMarker": {}},
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s1", "attempt": 1, "agentMessageDelta": {"text": "Hel"}},
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s1", "attempt": 1, "agentMessageDelta": {"text": "lo"}},
+    {"seq": "1", "type": "agent.message", "runId": "run_1", "stepId": "s1", "agentMessage": {"text": "Hello"}}
+  ],
+  "outputs": [
+    {"kind": "text", "stepId": "s1", "text": "Hel"},
+    {"kind": "text", "stepId": "s1", "text": "Hello"},
+    {"kind": "text", "stepId": "s1", "text": "Hello", "final": true}
+  ]
+}

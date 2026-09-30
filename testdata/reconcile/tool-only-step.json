@@ -1,0 +1,12 @@
+{
+  "description": "只有工具调用的 step 不产生文本；预览被清空时仍给出空的权威内容",
+  "events": [
+    {"seq": "1", "type": "agent.message", "runId": "run_1", "stepId": "s1", "agentMessage": {"text": ""}},
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s2", "attempt": 1, "agentMessageDelta": {"text": "x"}},
+    {"seq": "2", "type": "agent.message", "runId": "run_1", "stepId": "s2", "agentMessage": {"text": ""}}
+  ],
+  "outputs": [
+    {"kind": "text", "stepId": "s2", "text": "x"},
+    {"kind": "text", "stepId": "s2", "text": "", "final": true}
+  ]
+}

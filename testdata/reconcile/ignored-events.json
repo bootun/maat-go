@@ -1,0 +1,16 @@
+{
+  "description": "心跳、lagged、状态等其他事件不影响文本对账",
+  "events": [
+    {"type": "stream.heartbeat", "streamHeartbeat": {"resumeToken": "t"}},
+    {"seq": "1", "type": "session.status_changed", "sessionStatusChanged": {"status": "SESSION_STATUS_RUNNING"}},
+    {"seq": "2", "type": "run.started", "runId": "run_1", "runStarted": {"trigger": "RUN_TRIGGER_USER_MESSAGE", "model": "main"}},
+    {"type": "stream.marker", "runId": "run_1", "stepId": "s1", "attempt": 1, "streamMarker": {}},
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s1", "attempt": 1, "agentMessageDelta": {"text": "x"}},
+    {"type": "stream.lagged", "streamLagged": {"droppedCount": "3"}},
+    {"type": "thread.compaction_started", "runId": "run_1", "stepId": "s1", "attempt": 1, "threadCompactionStarted": {}},
+    {"type": "stream.heartbeat", "streamHeartbeat": {"resumeToken": "u", "closing": true}}
+  ],
+  "outputs": [
+    {"kind": "text", "stepId": "s1", "text": "x"}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "description": "reset：丢弃所有未提交的预览（按 step 首次出现的顺序通知），已提交的不受影响",
+  "events": [
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s1", "attempt": 1, "agentMessageDelta": {"text": "one"}},
+    {"seq": "1", "type": "agent.message", "runId": "run_1", "stepId": "s1", "agentMessage": {"text": "one"}},
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s2", "attempt": 1, "agentMessageDelta": {"text": "two"}},
+    {"type": "stream.marker", "runId": "run_1", "stepId": "s3", "attempt": 1, "streamMarker": {}},
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s4", "attempt": 1, "agentMessageDelta": {"text": "four"}},
+    {"type": "stream.reset", "streamReset": {}},
+    {"type": "agent.message.delta", "runId": "run_1", "stepId": "s2", "attempt": 1, "agentMessageDelta": {"text": "-more"}}
+  ],
+  "outputs": [
+    {"kind": "text", "stepId": "s1", "text": "one"},
+    {"kind": "text", "stepId": "s1", "text": "one", "final": true},
+    {"kind": "text", "stepId": "s2", "text": "two"},
+    {"kind": "text", "stepId": "s4", "text": "four"},
+    {"kind": "rewound", "stepId": "s2"},
+    {"kind": "rewound", "stepId": "s4"},
+    {"kind": "text", "stepId": "s2", "text": "-more"}
+  ]
+}
